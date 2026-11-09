@@ -1,0 +1,100 @@
+# Proteco MOVER for Flipper Zero
+
+Read, decode, save and send Proteco MOVER gate remotes (Italian sliding gate motors) on Flipper
+Zero without patching the firmware. A firmware patch that adds the same protocol to the stock
+Sub-GHz app is included too.
+
+Upstream issue: https://github.com/flipperdevices/flipperzero-firmware/issues/2345
+
+## Protocol
+
+433.92 MHz, AM650 (OOK), 24 bit fixed code. CAME line coding at a slower clock, which is why the
+CAME decoder rejects it:
+
+| part  | levels                         |
+|-------|--------------------------------|
+| guard | LOW ~21 Te (~9.1 ms)           |
+| start | HIGH Te                        |
+| bit 1 | LOW 2 Te, HIGH Te              |
+| bit 0 | LOW Te, HIGH 2 Te              |
+
+Te is ~440 us, bits go MSB first, and the frame repeats while the button is held.
+
+## App (FAP)
+
+- **Read**: listen on 433.92 MHz. Shows the key, the frame count and an RSSI bar. Press OK to use the key.
+- **Open / Decode .sub**: browse `/ext/subghz`.
+  - A `Protocol: Proteco` key file is loaded as is.
+  - A RAW capture (`Protocol: RAW`) is decoded, and the first key found is shown with its frame count.
+- **Add Manually**: type the 24 bit key.
+- **Key screen**: hold **OK** to send. Each burst is 10 frames, and bursts repeat while OK is held.
+  Press **Right** to save the key as a native `.sub` file in `/ext/subghz`, which turns a RAW
+  capture into a key file.
+
+Saved files use the same format as the firmware patch:
+
+```
+Filetype: Flipper SubGhz Key File
+Version: 1
+Frequency: 433920000
+Preset: FuriHalSubGhzPresetOok650Async
+Protocol: Proteco
+Bit: 24
+Key: 00 00 00 00 00 12 34 56
+```
+
+A key saved by the app also works in the stock Sub-GHz app on patched firmware, and the other way round.
+On unpatched firmware, the stock app doesn't know the `Proteco` protocol, so open those files with this app.
+
+An external CC1101 module on the GPIO header is used when one is attached, otherwise the internal radio.
+The screen shows `Ext radio` or `Int radio`.
+- A module plugged in while the app runs is picked up within about 5 s, at the next Read or OK press.
+- A module pulled out falls back to the internal radio, also during Read.
+- The app powers the module through the 5 V pin (OTG), and only switches that power off again if it
+  turned it on itself.
+- The amp/LED setting for E07-style modules comes from the firmware's Sub-GHz settings.
+
+TX follows the firmware's region settings.
+
+### Build
+
+Inside a firmware checkout, for example Unleashed:
+
+```sh
+ln -s /path/to/flipper-proteco applications_user/proteco
+./fbt fap_proteco                 # -> build/f7-firmware-*/.extapps/proteco.fap
+./fbt launch APPSRC=proteco       # build, copy over USB and start
+```
+
+Or with [ufbt](https://github.com/flipperdevices/flipperzero-ufbt), using the SDK of the firmware on
+your Flipper:
+
+```sh
+cd flipper-proteco && ufbt        # ufbt launch to install and start
+```
+
+Copy `proteco.fap` to `/ext/apps/Sub-GHz/` on the SD card.
+
+### Host test
+
+The codec (`proteco_codec.c`) is plain C. This runs encode/decode round trips and timing jitter
+checks, and decodes any RAW `.sub` files you pass in:
+
+```sh
+make -C tests                                   # FW=path/to/firmware if not ../unleashed-firmware
+make -C tests RAW="my_capture.sub other.sub"
+```
+
+## Firmware patch
+
+`proteco-mover-subghz.patch` adds a native `Proteco` protocol to Unleashed. It provides decode, save and
+send from the stock Sub-GHz app, plus unit tests. Apply it from the firmware root:
+
+```sh
+git apply --3way /path/to/flipper-proteco/proteco-mover-subghz.patch
+```
+
+It needs Unleashed dev from 2026-08-31 (PR #1116) or later, which has the shared helpers in
+`lib/subghz/protocols/common.h`. If `--3way` leaves a conflict, it will be in the one-line registry
+entries in `protocol_items.c/.h`. Keep upstream's lines and add `&subghz_protocol_proteco,` /
+`#include "proteco.h"` anywhere in the list.
