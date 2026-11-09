@@ -26,10 +26,12 @@ Te is ~440 us, bits go MSB first, and the frame repeats while the button is held
 - **Open / Decode .sub**: browse `/ext/subghz`.
   - A `Protocol: Proteco` key file is loaded as is.
   - A RAW capture (`Protocol: RAW`) is decoded, and the first key found is shown with its frame count.
+  - A BinRAW key file (`Protocol: BinRAW`, what the stock app saves when it reads an unknown signal
+    with BinRAW on) is decoded the same way, from its `TE` and `Bit_RAW`/`Data_RAW` chunks.
 - **Add Manually**: type the 24 bit key.
 - **Key screen**: hold **OK** to send. Each burst is 10 frames, and bursts repeat while OK is held.
-  Press **Right** to save the key as a native `.sub` file in `/ext/subghz`, which turns a RAW
-  capture into a key file.
+  Press **Right** to save the key as a native `.sub` file in `/ext/subghz`, which turns a RAW or
+  BinRAW capture into a key file.
 
 Saved files use the same format as the firmware patch:
 
@@ -77,8 +79,11 @@ Copy `proteco.fap` to `/ext/apps/Sub-GHz/` on the SD card.
 
 ### Host test
 
-The codec (`proteco_codec.c`) is plain C. This runs encode/decode round trips and timing jitter
-checks, and decodes any RAW `.sub` files you pass in:
+The app's codec (`proteco_codec.c`) is plain C. The test builds it together with the firmware's
+`lib/subghz/protocols/proteco.c` from the patched checkout, and feeds every signal to both decoders,
+which have to agree. It runs encode/decode round trips with timing jitter, then decodes the RAW and
+BinRAW `.sub` files (all of `dumps/` by default). Each key it finds is re-encoded by the firmware
+encoder and decoded again. For BinRAW files, the re-encoded frame has to match the capture bit for bit.
 
 ```sh
 make -C tests                                   # FW=path/to/firmware if not ../unleashed-firmware

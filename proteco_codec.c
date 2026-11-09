@@ -96,3 +96,18 @@ LevelDuration proteco_encoder_yield(void* context) {
     }
     return ret;
 }
+
+void proteco_bin_raw_feed(ProtecoBinRaw* bin, const uint8_t* data, size_t bits, uint32_t te) {
+    size_t pad = (8 - bits % 8) % 8;
+    for(size_t i = pad; i < pad + bits; i++) {
+        bool level = (data[i / 8] >> (7 - i % 8)) & 1;
+        if(bin->duration && level != bin->level) proteco_bin_raw_flush(bin);
+        bin->level = level;
+        bin->duration += te;
+    }
+}
+
+void proteco_bin_raw_flush(ProtecoBinRaw* bin) {
+    if(bin->duration) bin->callback(bin->context, bin->level, bin->duration);
+    bin->duration = 0;
+}

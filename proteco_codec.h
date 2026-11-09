@@ -44,3 +44,23 @@ void proteco_encoder_load(ProtecoEncoder* encoder, uint32_t key, size_t repeat);
 
 /** SubGhzDevice async TX callback, context is a ProtecoEncoder. */
 LevelDuration proteco_encoder_yield(void* context);
+
+typedef void (*ProtecoPairCallback)(void* context, bool level, uint32_t duration);
+
+/** Turns BinRAW bit chunks back into level/duration pairs. */
+typedef struct {
+    ProtecoPairCallback callback;
+    void* context;
+    bool level;
+    uint32_t duration; // of the run not yet passed on, 0 = none
+} ProtecoBinRaw;
+
+/**
+ * Feed one Bit_RAW/Data_RAW chunk: bits right aligned in data (as bin_raw.c stores them),
+ * MSB first, 1 = HIGH, each bit te us. A run that goes on into the next chunk is merged,
+ * so call proteco_bin_raw_flush() after the last chunk.
+ */
+void proteco_bin_raw_feed(ProtecoBinRaw* bin, const uint8_t* data, size_t bits, uint32_t te);
+
+/** Pass on the last pending run. */
+void proteco_bin_raw_flush(ProtecoBinRaw* bin);

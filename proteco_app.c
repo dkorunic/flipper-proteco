@@ -33,6 +33,7 @@
 #define SUBGHZ_KEY_FILETYPE "Flipper SubGhz Key File"
 #define SUBGHZ_RAW_FILETYPE "Flipper SubGhz RAW File"
 #define RAW_END_GUARD_US    100000u
+#define BIN_RAW_MAX_BITS    (512u * 8u) // BIN_RAW_BUF_DATA_SIZE in lib/subghz/protocols/bin_raw.c
 
 typedef enum {
     ProtecoSceneStart,
@@ -254,24 +255,22 @@ static bool proteco_save_key(ProtecoApp* app, const char* path) {
     return ok;
 }
 
-/** Feed every RAW_Data sample of an opened RAW file through the decoder. */
-static void proteco_decode_raw_sample(
-    ProtecoApp* app,
-    ProtecoDecoder* decoder,
-    bool level,
-    uint32_t duration) {
+/** Decode one sample of a file. RX is never running then, so app->decoder is free. */
+static void proteco_decode_raw_sample(void* context, bool level, uint32_t duration) {
+    ProtecoApp* app = context;
     uint32_t key;
-    if(proteco_decoder_feed(decoder, level, duration, &key)) {
+    if(proteco_decoder_feed(&app->decoder, level, duration, &key)) {
         // keep the first key found, count its frames
         if(!app->frames) app->key = key;
         if(key == app->key) app->frames++;
     }
 }
 
+/** Feed every RAW_Data sample of an opened RAW file through the decoder. */
 static bool proteco_decode_raw(ProtecoApp* app, FlipperFormat* ff) {
-    ProtecoDecoder decoder = {0};
     uint32_t count = 0, capacity = 0;
     int32_t* samples = NULL;
+    proteco_decoder_reset(&app->decoder);
     app->frames = 0;
 
     while(flipper_format_get_value_count(ff, "RAW_Data", &count) && count) {
@@ -282,12 +281,33 @@ static bool proteco_decode_raw(ProtecoApp* app, FlipperFormat* ff) {
         }
         if(!flipper_format_read_int32(ff, "RAW_Data", samples, count)) break;
         for(uint32_t i = 0; i < count; i++) {
-            proteco_decode_raw_sample(app, &decoder, samples[i] > 0, (uint32_t)abs(samples[i]));
+            proteco_decode_raw_sample(app, samples[i] > 0, (uint32_t)abs(samples[i]));
         }
     }
     // closing guard, so a frame that ends the file is counted too
-    proteco_decode_raw_sample(app, &decoder, false, RAW_END_GUARD_US);
+    proteco_decode_raw_sample(app, false, RAW_END_GUARD_US);
     free(samples);
+    return app->frames > 0;
+}
+
+/** Decode the Bit_RAW/Data_RAW chunks of an opened BinRAW key file. */
+static bool proteco_decode_bin_raw(ProtecoApp* app, FlipperFormat* ff) {
+    ProtecoBinRaw bin = {.callback = proteco_decode_raw_sample, .context = app};
+    uint32_t te = 0, bits = 0;
+    proteco_decoder_reset(&app->decoder);
+    app->frames = 0;
+
+    if(!flipper_format_read_uint32(ff, "TE", &te, 1) || !te) return false;
+    // bin_raw.c keeps at most this much data
+    while(flipper_format_read_uint32(ff, "Bit_RAW", &bits, 1) && bits && bits <= BIN_RAW_MAX_BITS) {
+        uint8_t* data = malloc((bits + 7) / 8);
+        bool read = flipper_format_read_hex(ff, "Data_RAW", data, (bits + 7) / 8);
+        if(read) proteco_bin_raw_feed(&bin, data, bits, te);
+        free(data);
+        if(!read) break;
+    }
+    proteco_bin_raw_flush(&bin);
+    proteco_decode_raw_sample(app, false, RAW_END_GUARD_US);
     return app->frames > 0;
 }
 
@@ -318,6 +338,9 @@ static bool proteco_load_file(ProtecoApp* app, const char* path) {
            furi_string_equal(protocol, "RAW")) {
             ok = proteco_decode_raw(app, ff);
             if(!ok) furi_string_set(app->message, "No Proteco signal\nfound in this RAW file");
+        } else if(furi_string_equal(protocol, "BinRAW")) {
+            ok = proteco_decode_bin_raw(app, ff);
+            if(!ok) furi_string_set(app->message, "No Proteco signal\nfound in this BinRAW file");
         } else if(furi_string_equal(protocol, PROTECO_PROTOCOL)) {
             if(!flipper_format_read_uint32(ff, "Bit", &bits, 1) || bits != PROTECO_BITS ||
                !flipper_format_read_hex(ff, "Key", key, sizeof(key))) {
@@ -330,7 +353,7 @@ static bool proteco_load_file(ProtecoApp* app, const char* path) {
         } else {
             furi_string_printf(
                 app->message,
-                "Protocol %s\nis not Proteco or RAW",
+                "Protocol %s\nis not Proteco, RAW\nor BinRAW",
                 furi_string_get_cstr(protocol));
         }
     } while(false);
@@ -799,7 +822,8 @@ static bool proteco_scene_about_on_event(void* context, SceneManagerEvent event)
         "at Te 440us).\n\n"
         "Read: listen for a remote.\n"
         "Open: load a Proteco key\n"
-        "or decode a RAW .sub.\n"
+        "or decode a RAW or\n"
+        "BinRAW .sub.\n"
         "Add Manually: type a key.\n\n"
         "Key screen: hold OK to\n"
         "send, Right to save.\n"

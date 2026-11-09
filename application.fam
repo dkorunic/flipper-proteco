@@ -10,5 +10,5 @@ App(
     fap_icon="proteco_10px.png",
     fap_version="1.0",
     fap_author="Dinko Korunic",
-    fap_description="Read, decode RAW .sub, save and send Proteco MOVER gate remotes",
+    fap_description="Read, decode RAW/BinRAW .sub, save and send Proteco MOVER gate remotes",
 )

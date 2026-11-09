@@ -1,85 +1,288 @@
-// Host check for proteco_codec.c:  make -C tests  [FW=/path/to/firmware]  [RAW="a.sub b.sub"]
-// Round trips keys through encoder -> decoder (also with timing jitter), then decodes any RAW
-// .sub files given on the command line and prints the keys found.
+// Host check:  make -C tests  [FW=/path/to/firmware]  [RAW="a.sub b.sub"]  (RAW defaults to ../dumps)
+// Runs two Proteco implementations side by side: the app's proteco_codec.c and the firmware's
+// lib/subghz/protocols/proteco.c from the patch. Both decoders get every signal, and must agree.
+//  1. keys round trip through both encoders into both decoders, also with timing jitter
+//  2. each .sub given (RAW or BinRAW) is decoded, and its key is re-encoded by the firmware
+//     encoder, which must decode again and, for BinRAW, match the capture bit for bit.
 #include <assert.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include "../proteco_codec.h"
+#include <protocols/common.h>
+#include <protocols/proteco.h>
 
-static int decode_upload(ProtecoEncoder* enc, int jitter, uint32_t* last_key) {
-    ProtecoDecoder dec = {0};
-    int frames = 0;
+/* ----------------------- stubs for the firmware code ----------------------- */
+
+struct FlipperFormat {
+    uint64_t key;
+    uint32_t bits;
+};
+
+SubGhzBlockGenericGlobal subghz_block_generic_global;
+
+SubGhzProtocolStatus subghz_block_generic_deserialize_check_count_bit(
+    SubGhzBlockGeneric* instance,
+    FlipperFormat* ff,
+    uint16_t count_bit) {
+    if(ff->bits != count_bit) return SubGhzProtocolStatusErrorValueBitCount;
+    instance->data_count_bit = ff->bits;
+    instance->data = ff->key;
+    return SubGhzProtocolStatusOk;
+}
+
+SubGhzProtocolStatus subghz_block_generic_serialize(
+    SubGhzBlockGeneric* instance,
+    FlipperFormat* ff,
+    SubGhzRadioPreset* preset) {
+    UNUSED(instance);
+    UNUSED(ff);
+    UNUSED(preset);
+    return SubGhzProtocolStatusError;
+}
+
+bool flipper_format_rewind(FlipperFormat* ff) {
+    UNUSED(ff);
+    return true;
+}
+
+bool flipper_format_read_uint32(FlipperFormat* ff, const char* key, uint32_t* data, uint16_t n) {
+    UNUSED(ff);
+    UNUSED(key);
+    UNUSED(data);
+    UNUSED(n);
+    return false; // no Repeat, keep the protocol's default
+}
+
+bool flipper_format_write_uint32(
+    FlipperFormat* ff,
+    const char* key,
+    const uint32_t* data,
+    uint16_t n) {
+    UNUSED(ff);
+    UNUSED(key);
+    UNUSED(data);
+    UNUSED(n);
+    return false;
+}
+
+bool flipper_format_insert_or_update_hex(
+    FlipperFormat* ff,
+    const char* key,
+    const uint8_t* data,
+    uint16_t n) {
+    UNUSED(ff);
+    UNUSED(key);
+    UNUSED(data);
+    UNUSED(n);
+    return false;
+}
+
+void furi_string_cat_printf(FuriString* string, const char format[], ...) {
+    UNUSED(string);
+    UNUSED(format);
+}
+
+/* ----------------------- both decoders on one signal ----------------------- */
+
+typedef struct {
+    ProtecoDecoder app;
+    SubGhzProtocolDecoderCommon* fw;
+    int app_frames, fw_frames;
+    uint32_t app_key, fw_key;
+    bool app_mixed, fw_mixed; // more than one key seen
+} Sink;
+
+static void sink_fw_callback(SubGhzProtocolDecoderBase* base, void* context) {
+    Sink* sink = context;
+    uint32_t key = ((SubGhzProtocolDecoderCommon*)base)->generic.data;
+    assert(((SubGhzProtocolDecoderCommon*)base)->generic.data_count_bit == PROTECO_BITS);
+    if(sink->fw_frames++ && key != sink->fw_key) sink->fw_mixed = true;
+    sink->fw_key = key;
+}
+
+static void sink_init(Sink* sink) {
+    memset(sink, 0, sizeof(*sink));
+    sink->fw = subghz_protocol_proteco.decoder->alloc(NULL);
+    sink->fw->base.callback = sink_fw_callback;
+    sink->fw->base.context = sink;
+    subghz_protocol_proteco.decoder->reset(sink->fw);
+}
+
+static void sink_feed(void* context, bool level, uint32_t duration) {
+    Sink* sink = context;
     uint32_t key;
-    for(LevelDuration ld = proteco_encoder_yield(enc); !level_duration_is_reset(ld);
-        ld = proteco_encoder_yield(enc)) {
-        int32_t d = (int32_t)level_duration_get_duration(ld);
-        if(jitter) d += (rand() % (2 * jitter + 1)) - jitter;
-        if(proteco_decoder_feed(&dec, level_duration_get_level(ld), (uint32_t)d, &key)) {
-            frames++;
-            *last_key = key;
-        }
+    if(proteco_decoder_feed(&sink->app, level, duration, &key)) {
+        if(sink->app_frames++ && key != sink->app_key) sink->app_mixed = true;
+        sink->app_key = key;
     }
-    // closing guard so the last frame is reported as well
-    if(proteco_decoder_feed(&dec, false, 100000, &key)) {
-        frames++;
-        *last_key = key;
+    subghz_protocol_proteco.decoder->feed(sink->fw, level, duration);
+}
+
+/** Closing guard so the last frame is reported, then check both decoders agree. */
+static int sink_done(Sink* sink) {
+    sink_feed(sink, false, 100000);
+    subghz_protocol_proteco.decoder->free(sink->fw);
+    assert(sink->app_frames == sink->fw_frames);
+    assert(!sink->app_mixed && !sink->fw_mixed);
+    if(sink->app_frames) assert(sink->app_key == sink->fw_key);
+    return sink->app_frames;
+}
+
+/* --------------------------------- encoders -------------------------------- */
+
+static int jitter_of(int jitter) {
+    return jitter ? (rand() % (2 * jitter + 1)) - jitter : 0;
+}
+
+static int run_app_encoder(uint32_t key, int jitter) {
+    ProtecoEncoder enc;
+    Sink sink;
+    sink_init(&sink);
+    proteco_encoder_load(&enc, key, 3);
+    for(LevelDuration ld = proteco_encoder_yield(&enc); !level_duration_is_reset(ld);
+        ld = proteco_encoder_yield(&enc)) {
+        sink_feed(
+            &sink,
+            level_duration_get_level(ld),
+            level_duration_get_duration(ld) + jitter_of(jitter));
     }
+    int frames = sink_done(&sink);
+    assert(sink.app_key == key);
     return frames;
 }
 
-static void decode_raw_file(const char* path) {
+/** Firmware encoder for key. Fills bits ('0'/'1' per 440us Te, from the start bit) if given. */
+static int run_fw_encoder(uint32_t key, int jitter, char* bits, size_t bits_size) {
+    FlipperFormat ff = {.key = key, .bits = PROTECO_BITS};
+    void* enc = subghz_protocol_proteco.encoder->alloc(NULL);
+    assert(subghz_protocol_proteco.encoder->deserialize(enc, &ff) == SubGhzProtocolStatusOk);
+
+    Sink sink;
+    sink_init(&sink);
+    size_t n = 0, len = 0;
+    for(LevelDuration ld = subghz_protocol_proteco.encoder->yield(enc);
+        !level_duration_is_reset(ld);
+        ld = subghz_protocol_proteco.encoder->yield(enc), n++) {
+        bool level = level_duration_get_level(ld);
+        uint32_t duration = level_duration_get_duration(ld);
+        // first frame: guard, start bit, 24 bit pairs
+        if(n == 0) assert(!level && duration == 21 * 440);
+        if(bits && n >= 1 && n < PROTECO_UPLOAD_SIZE) {
+            assert(duration % 440 == 0);
+            for(uint32_t i = 0; i < duration / 440 && len + 1 < bits_size; i++)
+                bits[len++] = level ? '1' : '0';
+        }
+        sink_feed(&sink, level, duration + jitter_of(jitter));
+    }
+    if(bits) bits[len] = '\0';
+    subghz_protocol_proteco.encoder->free(enc);
+
+    int frames = sink_done(&sink);
+    assert(sink.fw_key == key);
+    return frames;
+}
+
+/* ---------------------------------- files ---------------------------------- */
+
+static void decode_file(const char* path) {
     FILE* f = fopen(path, "r");
     if(!f) {
         perror(path);
         exit(1);
     }
-    ProtecoDecoder dec = {0};
-    char line[8192];
-    int frames = 0;
-    uint32_t key;
+    static char line[16384];
+    static char capture[8 * 512 + 1]; // BinRAW bits as '0'/'1'
+    size_t capture_len = 0;
+    uint32_t te = 0, chunk_bits = 0;
+    bool bin_raw = false;
+    Sink sink;
+    sink_init(&sink);
+    ProtecoBinRaw bin = {.callback = sink_feed, .context = &sink};
+
     while(fgets(line, sizeof(line), f)) {
-        if(strncmp(line, "RAW_Data:", 9) != 0) continue;
-        for(char* tok = strtok(line + 9, " \r\n"); tok; tok = strtok(NULL, " \r\n")) {
-            long v = strtol(tok, NULL, 10);
-            if(proteco_decoder_feed(&dec, v > 0, (uint32_t)labs(v), &key)) {
-                printf("  %s: frame %d key 0x%06X\n", path, ++frames, (unsigned)key);
+        if(!strncmp(line, "Protocol: BinRAW", 16)) bin_raw = true;
+        if(!strncmp(line, "TE:", 3)) te = strtoul(line + 3, NULL, 10);
+        if(!strncmp(line, "Bit_RAW:", 8)) chunk_bits = strtoul(line + 8, NULL, 10);
+        if(!strncmp(line, "Data_RAW:", 9)) {
+            assert(bin_raw && te && chunk_bits && chunk_bits <= 8 * 512);
+            uint8_t data[512];
+            size_t bytes = 0;
+            for(char* tok = strtok(line + 9, " \r\n"); tok; tok = strtok(NULL, " \r\n"))
+                data[bytes++] = strtoul(tok, NULL, 16);
+            assert(bytes == (chunk_bits + 7) / 8);
+            proteco_bin_raw_feed(&bin, data, chunk_bits, te);
+            for(size_t i = bytes * 8 - chunk_bits; i < bytes * 8; i++)
+                capture[capture_len++] = (data[i / 8] >> (7 - i % 8)) & 1 ? '1' : '0';
+            capture[capture_len] = '\0';
+        }
+        if(!strncmp(line, "RAW_Data:", 9)) {
+            for(char* tok = strtok(line + 9, " \r\n"); tok; tok = strtok(NULL, " \r\n")) {
+                long v = strtol(tok, NULL, 10);
+                sink_feed(&sink, v > 0, (uint32_t)labs(v));
             }
         }
     }
     fclose(f);
-    printf("%s: %d frame(s)\n", path, frames);
+    proteco_bin_raw_flush(&bin);
+    int frames = sink_done(&sink);
+    if(!frames) {
+        printf("%s: no Proteco frame\n", path);
+        exit(1);
+    }
+
+    // the firmware encoder must give back what the remote sent
+    static char encoded[PROTECO_UPLOAD_SIZE * 2 + 1];
+    assert(run_fw_encoder(sink.fw_key, 0, encoded, sizeof(encoded)) == 10);
+    if(bin_raw) {
+        char* at = strstr(capture, encoded);
+        assert(at && at - capture >= 20 && !strncmp(at - 20, "00000000000000000000", 20));
+    }
+    printf(
+        "%-40s %-6s %2d frame(s) key 0x%06X%s\n",
+        path,
+        bin_raw ? "BinRAW" : "RAW",
+        frames,
+        (unsigned)sink.fw_key,
+        bin_raw ? ", re-encoded frame matches the capture" : "");
 }
 
 int main(int argc, char** argv) {
-    const uint32_t keys[] = {0x000000, 0xFFFFFF, 0x5AC3E1, 0x123456, 0xA5A5A5};
+    const uint32_t keys[] = {0x000000, 0xFFFFFF, 0x5AC3E1, 0x123456, 0xA5A5A5, 0xDF2396};
     for(size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
         for(int jitter = 0; jitter <= 120; jitter += 120) {
-            ProtecoEncoder enc;
-            uint32_t got = ~0u;
-            proteco_encoder_load(&enc, keys[i], 3);
-            int frames = decode_upload(&enc, jitter, &got);
-            assert(frames == 3);
-            assert(got == keys[i]);
+            assert(run_app_encoder(keys[i], jitter) == 3);
+            assert(run_fw_encoder(keys[i], jitter, NULL, 0) == 10);
         }
     }
+
     // a 25th bit (longer, non Proteco frame) must not be reported
-    ProtecoDecoder dec = {0};
-    uint32_t key;
     ProtecoEncoder enc;
+    Sink sink;
+    sink_init(&sink);
     proteco_encoder_load(&enc, 0x123456, 1);
     for(size_t i = 0; i < PROTECO_UPLOAD_SIZE; i++)
-        assert(!proteco_decoder_feed(
-            &dec,
+        sink_feed(
+            &sink,
             level_duration_get_level(enc.upload[i]),
-            level_duration_get_duration(enc.upload[i]),
-            &key));
-    assert(!proteco_decoder_feed(&dec, false, 440, &key));
-    assert(!proteco_decoder_feed(&dec, true, 880, &key));
-    assert(!proteco_decoder_feed(&dec, false, 9240, &key));
-    printf("codec round trip: ok\n");
+            level_duration_get_duration(enc.upload[i]));
+    sink_feed(&sink, false, 440);
+    sink_feed(&sink, true, 880);
+    assert(sink_done(&sink) == 0);
+
+    // BinRAW chunks: right aligned, runs merged across chunk boundaries
+    Sink bin_sink;
+    sink_init(&bin_sink);
+    ProtecoBinRaw bin = {.callback = sink_feed, .context = &bin_sink};
+    const uint8_t a[] = {0x00, 0x00, 0x01, 0x25, 0x92}, b[] = {0x49, 0x6C, 0xB6, 0xC9, 0x2D, 0x96, 0x4B};
+    proteco_bin_raw_feed(&bin, a, 37, 440); // 3 pad bits, ends inside a run that b continues
+    proteco_bin_raw_feed(&bin, b, 56, 440);
+    proteco_bin_raw_flush(&bin);
+    assert(sink_done(&bin_sink) == 1 && bin_sink.app_key == 0xDF2396);
+    printf("codec round trip (app + firmware): ok\n");
 
     for(int i = 1; i < argc; i++)
-        decode_raw_file(argv[i]);
+        decode_file(argv[i]);
     return 0;
 }
