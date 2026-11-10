@@ -88,7 +88,33 @@ encoder and decoded again. For BinRAW files, the re-encoded frame has to match t
 ```sh
 make -C tests                                   # FW=path/to/firmware if not ../unleashed-firmware
 make -C tests RAW="my_capture.sub other.sub"
+python3 tests/binraw2raw.py OUT_DIR dumps/*.sub  # BinRAW key files -> RAW files
 ```
+
+## Sonoff RF Bridge (Tasmota)
+
+`tools/proteco_rfraw.py` makes an `RfRaw` payload for a Sonoff RF Bridge running Portisch firmware,
+or [mightymos/RF-Bridge-OB38S003](https://github.com/mightymos/RF-Bridge-OB38S003). It reads a
+Proteco key file, a RAW capture or a BinRAW file. RAW and BinRAW files are decoded with the same
+rules as the firmware decoder.
+
+```sh
+python3 tools/proteco_rfraw.py my_remote.sub           # 10 frames, one real press
+python3 tools/proteco_rfraw.py -n 12 my_remote.sub     # more frames if the gate still misses some
+```
+
+```
+my_remote.sub: key 0xDF2396, 186 frame(s)
+RfRaw AAB021030901B80370235A8181809181818181809091809090918181809091809181809255
+```
+
+Send it from Tasmota as `RfRaw <payload>; RfRaw 0`. The payload puts the guard at the **end** of
+each frame. These bridge firmwares keep the radio at the frame's last level between repeats. A
+payload that ends on a HIGH has its last bit stretched by that delay, and the gate drops the frame
+once the bit is ~150 µs too long. With the guard last, the delay only lengthens the guard. The
+firmware sends repeat byte + 1 frames, and the first one follows silence rather than a guard, so 9
+of the default 10 frames count. Every payload is decoded back before it's printed, both with no
+delay between repeats and with 800 µs.
 
 ## Firmware patch
 
@@ -101,5 +127,6 @@ git apply --3way /path/to/flipper-proteco/proteco-mover-subghz.patch
 
 It needs Unleashed dev from 2026-08-31 (PR #1116) or later, which has the shared helpers in
 `lib/subghz/protocols/common.h`. If `--3way` leaves a conflict, it will be in the one-line registry
-entries in `protocol_items.c/.h`. Keep upstream's lines and add `&subghz_protocol_proteco,` /
-`#include "proteco.h"` anywhere in the list.
+entries in `protocol_items.c/.h`. Keep upstream's lines and append `&subghz_protocol_proteco,` /
+`#include "proteco.h"` as the last entries. Placed higher up, they make clang-format (`./fbt lint`)
+want the whole registry reflowed.

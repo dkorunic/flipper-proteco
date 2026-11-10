@@ -3,7 +3,7 @@
 // lib/subghz/protocols/proteco.c from the patch. Both decoders get every signal, and must agree.
 //  1. keys round trip through both encoders into both decoders, also with timing jitter
 //  2. each .sub given (RAW or BinRAW) is decoded, and its key is re-encoded by the firmware
-//     encoder, which must decode again and, for BinRAW, match the capture bit for bit.
+//     encoder, which must decode again and equal every decoded captured frame at Te resolution.
 #include <assert.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -186,6 +186,32 @@ static int run_fw_encoder(uint32_t key, int jitter, char* bits, size_t bits_size
 
 /* ---------------------------------- files ---------------------------------- */
 
+/** Append n copies of c to the growing '0'/'1' capture string. */
+static void capture_add(char** buf, size_t* len, size_t* size, char c, size_t n) {
+    if(*len + n + 1 > *size) {
+        *size = (*len + n + 1) * 2;
+        *buf = realloc(*buf, *size);
+        assert(*buf);
+    }
+    memset(*buf + *len, c, n);
+    *len += n;
+    (*buf)[*len] = '\0';
+}
+
+/** Captured frames identical to encoded, behind a guard the decoder takes: one LOW of
+ * 18..24 Te (its window is 7665..10815us). Longer LOWs are silence, not a Proteco guard. */
+static int count_frames(const char* capture, const char* encoded) {
+    int count = 0;
+    for(const char* at = strstr(capture, encoded); at; at = strstr(at + 1, encoded)) {
+        const char* run = at;
+        while(run > capture && run[-1] == '0')
+            run--;
+        long guard = at - run;
+        if(guard >= 18 && guard <= 24) count++;
+    }
+    return count;
+}
+
 static void decode_file(const char* path) {
     FILE* f = fopen(path, "r");
     if(!f) {
@@ -193,8 +219,10 @@ static void decode_file(const char* path) {
         exit(1);
     }
     static char line[16384];
-    static char capture[8 * 512 + 1]; // BinRAW bits as '0'/'1'
-    size_t capture_len = 0;
+    // the signal at Te resolution, '0'/'1' per Te: BinRAW bits as stored, RAW durations
+    // rounded to whole 440us Te (the receiver's HIGH stretch / LOW shrink stays well inside)
+    char* capture = NULL;
+    size_t capture_len = 0, capture_size = 0;
     uint32_t te = 0, chunk_bits = 0;
     bool bin_raw = false;
     Sink sink;
@@ -213,14 +241,19 @@ static void decode_file(const char* path) {
                 data[bytes++] = strtoul(tok, NULL, 16);
             assert(bytes == (chunk_bits + 7) / 8);
             proteco_bin_raw_feed(&bin, data, chunk_bits, te);
-            for(size_t i = bytes * 8 - chunk_bits; i < bytes * 8; i++)
-                capture[capture_len++] = (data[i / 8] >> (7 - i % 8)) & 1 ? '1' : '0';
-            capture[capture_len] = '\0';
+            for(size_t i = bytes * 8 - chunk_bits; i < bytes * 8; i++) {
+                char bit = (data[i / 8] >> (7 - i % 8)) & 1 ? '1' : '0';
+                capture_add(&capture, &capture_len, &capture_size, bit, 1);
+            }
         }
         if(!strncmp(line, "RAW_Data:", 9)) {
             for(char* tok = strtok(line + 9, " \r\n"); tok; tok = strtok(NULL, " \r\n")) {
                 long v = strtol(tok, NULL, 10);
                 sink_feed(&sink, v > 0, (uint32_t)labs(v));
+                // at least one Te, so a noise spike still splits a LOW, as it does for the decoder
+                size_t n = (labs(v) + 220) / 440;
+                n = n < 1 ? 1 : (n > 64 ? 64 : n);
+                capture_add(&capture, &capture_len, &capture_size, v > 0 ? '1' : '0', n);
             }
         }
     }
@@ -232,20 +265,24 @@ static void decode_file(const char* path) {
         exit(1);
     }
 
-    // the firmware encoder must give back what the remote sent
+    // the firmware encoder must give back what the remote sent: every frame the decoder took
+    // is, at Te resolution, exactly the encoder's frame
     static char encoded[PROTECO_UPLOAD_SIZE * 2 + 1];
     assert(run_fw_encoder(sink.fw_key, 0, encoded, sizeof(encoded)) == 10);
-    if(bin_raw) {
-        char* at = strstr(capture, encoded);
-        assert(at && at - capture >= 20 && !strncmp(at - 20, "00000000000000000000", 20));
+    int matched = count_frames(capture ? capture : "", encoded);
+    free(capture);
+    if(matched != frames) {
+        printf("%s: decoded %d frames, but %d match the encoder\n", path, frames, matched);
+        exit(1);
     }
     printf(
-        "%-40s %-6s %2d frame(s) key 0x%06X%s\n",
+        "%-40s %-6s %3d frame(s) key 0x%06X, encoder frame == %d/%d captured frames\n",
         path,
         bin_raw ? "BinRAW" : "RAW",
         frames,
         (unsigned)sink.fw_key,
-        bin_raw ? ", re-encoded frame matches the capture" : "");
+        matched,
+        frames);
 }
 
 int main(int argc, char** argv) {
