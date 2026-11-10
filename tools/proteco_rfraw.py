@@ -20,7 +20,7 @@ import argparse
 import re
 import sys
 
-TE, LONG, GUARD_TE = 440, 880, 21  # decoder timings, us
+TE, LONG = 440, 880  # decoder timings, us
 DELTA = 150
 GUARD_US = 9050  # sent guard: measured on a Proteco TX3, Te 441us, guard 20.5 Te
 BITS = 24
@@ -30,36 +30,39 @@ def near(d, nominal, delta):
     return abs(d - nominal) < delta
 
 
-def is_guard(d):
-    return near(d, TE * GUARD_TE, DELTA * GUARD_TE // 2)
-
-
 def decode(samples):
-    """Keys of the complete frames in a signed duration list (+ HIGH, - LOW)."""
-    keys, step, data, bits, last = [], 0, 0, 0, 0
-    for s in list(samples) + [-100000]:  # closing guard: report a frame that ends the input
+    """Keys of the complete frames in a signed duration list (+ HIGH, - LOW).
+
+    The firmware's state machine: any LOW of 4 Te or more may open a frame, and once its
+    24 bits are in, that guard must be 18.5..22.5 Te of the frame's own clock, measured
+    over its 73 Te of pulses (start bit + 3 Te per bit).
+    """
+    keys, step, data, bits, last, te, guard = [], 0, 0, 0, 0, 0, 0
+    for s in list(samples) + [-100000]:  # closing gap: report a frame that ends the input
         level, d = s > 0, abs(s)
         if step == 0:
-            step = 1 if not level and is_guard(d) else 0
+            if not level and d >= TE * 4:
+                guard, step = d, 1
         elif step == 1:
             if level and near(d, TE, DELTA):
-                data, bits, step = 0, 0, 2
+                data, bits, te, step = 0, 0, d, 2
             else:
                 step = 0
         elif step == 2:
             if level:
                 step = 0
-            elif d >= TE * 4:  # guard reached, the frame ends here
-                if bits == BITS:
+            elif d >= TE * 4:  # this gap ends the frame and is the next frame's guard
+                frame_te = te // (1 + BITS * 3)
+                if bits == BITS and frame_te * 37 // 2 <= guard <= frame_te * 45 // 2:
                     keys.append(data)
-                step = 1 if is_guard(d) else 0
+                guard, step = d, 1
             else:
-                last, step = d, 3
+                last, te, step = d, te + d, 3
         else:
             one = near(last, LONG, DELTA) and near(d, TE, DELTA)
             zero = near(last, TE, DELTA) and near(d, LONG, DELTA)
             if level and bits < BITS and (one or zero):
-                data, bits, step = data << 1 | one, bits + 1, 2
+                data, bits, te, step = data << 1 | one, bits + 1, te + d, 2
             else:
                 step = 0
     return keys

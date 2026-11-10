@@ -62,6 +62,8 @@ typedef enum {
     ProtecoEventOkPress,
     ProtecoEventOkRelease,
     ProtecoEventRight,
+    ProtecoEventUp,
+    ProtecoEventDown,
     ProtecoEventInputDone,
 } ProtecoEvent;
 
@@ -79,6 +81,8 @@ typedef struct {
     uint16_t frames;
     float rssi;
     bool external;
+    uint32_t te; // Read: measured Te of the last frame, 0 = none yet
+    uint32_t gap; // Read: the guard before it, us
     char source[40];
 } ProtecoModel;
 
@@ -108,6 +112,10 @@ typedef struct {
     bool tx_running;
     bool tx_held;
     volatile uint32_t rx_key;
+    volatile uint32_t rx_te;
+    volatile uint32_t rx_gap;
+    uint32_t frame_te; // of the last frame received in Read
+    uint32_t frame_gap;
 
     // current key
     bool key_valid;
@@ -128,6 +136,8 @@ static void proteco_rx_pair_callback(void* context, bool level, uint32_t duratio
     ProtecoApp* app = context;
     uint32_t key;
     if(proteco_decoder_feed(&app->decoder, level, duration, &key)) {
+        app->rx_te = app->decoder.frame_te;
+        app->rx_gap = app->decoder.frame_guard;
         app->rx_key = key;
         view_dispatcher_send_custom_event(app->view_dispatcher, ProtecoEventRxKey);
     }
@@ -299,7 +309,8 @@ static bool proteco_decode_bin_raw(ProtecoApp* app, FlipperFormat* ff) {
 
     if(!flipper_format_read_uint32(ff, "TE", &te, 1) || !te) return false;
     // bin_raw.c keeps at most this much data
-    while(flipper_format_read_uint32(ff, "Bit_RAW", &bits, 1) && bits && bits <= BIN_RAW_MAX_BITS) {
+    while(flipper_format_read_uint32(ff, "Bit_RAW", &bits, 1) && bits &&
+          bits <= BIN_RAW_MAX_BITS) {
         uint8_t* data = malloc((bits + 7) / 8);
         bool read = flipper_format_read_hex(ff, "Data_RAW", data, (bits + 7) / 8);
         if(read) proteco_bin_raw_feed(&bin, data, bits, te);
@@ -381,6 +392,8 @@ static void proteco_view_update(ProtecoApp* app, ProtecoMode mode, float rssi) {
             model->key = app->key;
             model->frequency = (mode == ProtecoModeRead) ? PROTECO_FREQUENCY : app->frequency;
             model->frames = app->frames;
+            model->te = (mode == ProtecoModeRead) ? app->frame_te : 0;
+            model->gap = app->frame_gap;
             model->rssi = rssi;
             model->external = app->radio_external;
             snprintf(
@@ -389,13 +402,23 @@ static void proteco_view_update(ProtecoApp* app, ProtecoMode mode, float rssi) {
         true);
 }
 
+/** Draw the first of the candidate lines that fits the screen width. */
+static void
+    proteco_draw_fitting(Canvas* canvas, int32_t y, const char* const* lines, size_t count) {
+    size_t i = 0;
+    while(i + 1 < count && canvas_string_width(canvas, lines[i]) > 124)
+        i++;
+    canvas_draw_str(canvas, 2, y, lines[i]);
+}
+
 static void proteco_view_draw(Canvas* canvas, void* context) {
     ProtecoModel* model = context;
+    bool read = model->mode == ProtecoModeRead;
     char line[64];
 
     canvas_clear(canvas);
     canvas_set_font(canvas, FontPrimary);
-    canvas_draw_str(canvas, 2, 10, model->mode == ProtecoModeRead ? "Proteco Read" : "Proteco");
+    canvas_draw_str(canvas, 2, 10, read ? "Proteco Read" : "Proteco");
 
     canvas_set_font(canvas, FontSecondary);
     snprintf(
@@ -410,23 +433,60 @@ static void proteco_view_draw(Canvas* canvas, void* context) {
         canvas_set_font(canvas, FontPrimary);
         snprintf(line, sizeof(line), "Key: 0x%06lX", model->key);
         canvas_draw_str(canvas, 2, 26, line);
+
         canvas_set_font(canvas, FontSecondary);
-        if(model->frames) {
-            snprintf(line, sizeof(line), "%s, %u frames", model->source, model->frames);
-        } else {
-            snprintf(line, sizeof(line), "%s", model->source);
+        snprintf(line, sizeof(line), "Btn %c", proteco_button(model->key));
+        canvas_draw_str_aligned(canvas, 126, 26, AlignRight, AlignBottom, line);
+        if(!read && !model->tx) {
+            // Up/Down change the button
+            int32_t x = 126 - canvas_string_width(canvas, line) - 5;
+            canvas_draw_triangle(canvas, x, 21, 5, 3, CanvasDirectionBottomToTop);
+            canvas_draw_triangle(canvas, x, 23, 5, 3, CanvasDirectionTopToBottom);
         }
-        canvas_draw_str(canvas, 2, 38, line);
+
+        if(read && model->te) {
+            // the frame's own clock and the gap before it, in its Te
+            uint32_t gap10 = (model->gap * 10 + model->te / 2) / model->te;
+            char full[64], mid[64], brief[64];
+            snprintf(
+                full,
+                sizeof(full),
+                "%u frames, Te %luus, gap %lu.%lu Te",
+                model->frames,
+                model->te,
+                gap10 / 10,
+                gap10 % 10);
+            snprintf(
+                mid,
+                sizeof(mid),
+                "x%u Te %luus gap %lu.%luTe",
+                model->frames,
+                model->te,
+                gap10 / 10,
+                gap10 % 10);
+            snprintf(
+                brief, sizeof(brief), "Te %luus gap %lu.%luTe", model->te, gap10 / 10, gap10 % 10);
+            const char* const lines[] = {full, mid, brief};
+            proteco_draw_fitting(canvas, 38, lines, 3);
+        } else if(model->frames) {
+            snprintf(line, sizeof(line), "%s, %u frames", model->source, model->frames);
+            canvas_draw_str(canvas, 2, 38, line);
+        } else {
+            canvas_draw_str(canvas, 2, 38, model->source);
+        }
+        if(!read) {
+            snprintf(line, sizeof(line), "Sn 0x%06lX", (model->key >> 2) & 0x3FFFFF);
+            canvas_draw_str(canvas, 2, 49, line);
+        }
     } else {
         canvas_draw_str(canvas, 2, 28, "Waiting for signal...");
         canvas_draw_str(canvas, 2, 38, "Press the remote button");
     }
 
-    canvas_set_font(canvas, FontSecondary);
     canvas_draw_str_aligned(
         canvas, 126, 49, AlignRight, AlignBottom, model->external ? "Ext radio" : "Int radio");
 
-    if(model->mode == ProtecoModeRead) {
+    if(read) {
         // RSSI bar, -100..-40 dBm
         float level = (model->rssi + 100.0f) / 60.0f;
         level = level < 0.0f ? 0.0f : (level > 1.0f ? 1.0f : level);
@@ -453,6 +513,12 @@ static bool proteco_view_input(InputEvent* event, void* context) {
     }
     if(event->key == InputKeyRight && event->type == InputTypeShort) {
         view_dispatcher_send_custom_event(app->view_dispatcher, ProtecoEventRight);
+        return true;
+    }
+    if((event->key == InputKeyUp || event->key == InputKeyDown) &&
+       (event->type == InputTypeShort || event->type == InputTypeRepeat)) {
+        view_dispatcher_send_custom_event(
+            app->view_dispatcher, event->key == InputKeyUp ? ProtecoEventUp : ProtecoEventDown);
         return true;
     }
     return false;
@@ -510,6 +576,7 @@ static void proteco_scene_read_on_enter(void* context) {
     app->frames = 0;
     app->frequency = PROTECO_FREQUENCY;
     furi_string_set(app->source, "Received");
+    app->frame_te = 0;
     proteco_rx_start(app);
     proteco_view_update(app, ProtecoModeRead, -100.0f);
     view_dispatcher_switch_to_view(app->view_dispatcher, ProtecoViewMain);
@@ -538,6 +605,8 @@ static bool proteco_scene_read_on_event(void* context, SceneManagerEvent event) 
         }
         app->key_valid = true;
         app->frames++;
+        app->frame_te = app->rx_te;
+        app->frame_gap = app->rx_gap;
         return true;
     }
     if(event.event == ProtecoEventOkPress && app->key_valid) {
@@ -652,6 +721,15 @@ static bool proteco_scene_key_on_event(void* context, SceneManagerEvent event) {
         return true;
     case ProtecoEventRight:
         if(!app->tx_running) scene_manager_next_scene(app->scene_manager, ProtecoSceneSave);
+        return true;
+    case ProtecoEventUp:
+    case ProtecoEventDown:
+        // same key, another button of the remote: A, B, C, D (D is unverified)
+        if(!app->tx_running) {
+            app->key = proteco_button_step(app->key, event.event == ProtecoEventUp ? 1 : -1);
+            app->frames = 0;
+            proteco_view_update(app, ProtecoModeKey, 0);
+        }
         return true;
     default:
         return false;
@@ -802,7 +880,7 @@ static bool proteco_about_input(InputEvent* event, void* context) {
 
 static void proteco_scene_about_on_enter(void* context) {
     ProtecoApp* app = context;
-    with_view_model(app->about_view, uint8_t* frame, { *frame = 0; }, true);
+    with_view_model(app->about_view, uint8_t * frame, { *frame = 0; }, true);
     view_dispatcher_switch_to_view(app->view_dispatcher, ProtecoViewAbout);
 }
 
@@ -810,7 +888,7 @@ static bool proteco_scene_about_on_event(void* context, SceneManagerEvent event)
     ProtecoApp* app = context;
     if(event.type == SceneManagerEventTypeTick) {
         with_view_model(
-            app->about_view, uint8_t* frame, { *frame = (*frame + 1) % ABOUT_FRAMES; }, true);
+            app->about_view, uint8_t * frame, { *frame = (*frame + 1) % ABOUT_FRAMES; }, true);
         return true;
     }
     if(event.type != SceneManagerEventTypeCustom || event.event != ProtecoEventRight) return false;
@@ -826,7 +904,10 @@ static bool proteco_scene_about_on_event(void* context, SceneManagerEvent event)
         "BinRAW .sub.\n"
         "Add Manually: type a key.\n\n"
         "Key screen: hold OK to\n"
-        "send, Right to save.\n"
+        "send, Up/Down to pick the\n"
+        "button (A gate, B pedes-\n"
+        "trian, C programming, D\n"
+        "unverified), Right to save.\n"
         "Keys go to /ext/subghz.\n\n"
         "Created by Dinko Korunic\n"
         "dinko.korunic@gmail.com");

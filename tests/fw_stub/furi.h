@@ -10,5 +10,6 @@
 #define UNUSED(x)       (void)(x)
 #define EXT_PATH(x)     "/ext/" x
 #define FURI_LOG_E(...)
+#define FURI_LOG_D(...)
 typedef struct FuriString FuriString;
 void furi_string_cat_printf(FuriString* string, const char format[], ...);

@@ -12,6 +12,7 @@
 #include "../proteco_codec.h"
 #include <protocols/common.h>
 #include <protocols/proteco.h>
+#include <blocks/custom_btn.h>
 
 /* ----------------------- stubs for the firmware code ----------------------- */
 
@@ -21,6 +22,11 @@ struct FlipperFormat {
 };
 
 SubGhzBlockGenericGlobal subghz_block_generic_global;
+
+bool subghz_block_generic_global_button_override_get(uint8_t* button) {
+    UNUSED(button);
+    return false; // no button editor on the host
+}
 
 SubGhzProtocolStatus subghz_block_generic_deserialize_check_count_bit(
     SubGhzBlockGeneric* instance,
@@ -150,6 +156,8 @@ static int run_app_encoder(uint32_t key, int jitter) {
     }
     int frames = sink_done(&sink);
     assert(sink.app_key == key);
+    // the measured clock and guard of the last frame, exact without jitter
+    if(!jitter) assert(sink.app.frame_te == 440 && sink.app.frame_guard == 9020);
     return frames;
 }
 
@@ -168,7 +176,8 @@ static int run_fw_encoder(uint32_t key, int jitter, char* bits, size_t bits_size
         bool level = level_duration_get_level(ld);
         uint32_t duration = level_duration_get_duration(ld);
         // first frame: guard, start bit, 24 bit pairs
-        if(n == 0) assert(!level && duration == 21 * 440);
+        // the guard: 21 Te in the first patch, 20.5 Te (the fob's) since PR #1210 was merged
+        if(n == 0) assert(!level && duration >= 20 * 440 && duration <= 21 * 440);
         if(bits && n >= 1 && n < PROTECO_UPLOAD_SIZE) {
             assert(duration % 440 == 0);
             for(uint32_t i = 0; i < duration / 440 && len + 1 < bits_size; i++)
@@ -285,6 +294,124 @@ static void decode_file(const char* path) {
         frames);
 }
 
+/** Custom buttons (PR #1210): a decoded A, sent as each of the 4 buttons. Skipped on trees
+ * whose proteco.c has no custom buttons. */
+static void check_custom_buttons(void) {
+    // TX3 A, then what the arrows give from A: B, C and the unverified fourth code
+    const uint32_t sent[] = {0xDF2396, 0xDF2394, 0xDF2395, 0xDF2397};
+    FlipperFormat ff = {.key = 0xDF2396, .bits = PROTECO_BITS};
+
+    subghz_custom_btns_reset();
+    void* dec = subghz_protocol_proteco.decoder->alloc(NULL);
+    assert(subghz_protocol_proteco.decoder->deserialize(dec, &ff) == SubGhzProtocolStatusOk);
+    subghz_protocol_proteco.decoder->get_string(dec, NULL); // the info screen sets the buttons up
+    subghz_protocol_proteco.decoder->free(dec);
+    if(!subghz_custom_btn_is_allowed()) {
+        printf("custom buttons: not in this firmware, skipped\n");
+        return;
+    }
+    assert(subghz_custom_btn_get_original() == 1); // A is button 1
+
+    for(uint8_t id = 0; id < 4; id++) {
+        assert(subghz_custom_btn_set(id));
+        void* enc = subghz_protocol_proteco.encoder->alloc(NULL);
+        assert(subghz_protocol_proteco.encoder->deserialize(enc, &ff) == SubGhzProtocolStatusOk);
+        Sink sink;
+        sink_init(&sink);
+        for(LevelDuration ld = subghz_protocol_proteco.encoder->yield(enc);
+            !level_duration_is_reset(ld);
+            ld = subghz_protocol_proteco.encoder->yield(enc))
+            sink_feed(&sink, level_duration_get_level(ld), level_duration_get_duration(ld));
+        subghz_protocol_proteco.encoder->free(enc);
+        assert(sink_done(&sink) == 10 && sink.fw_key == sent[id]);
+        // the app's button helper steps through the same keys, in the same order
+        assert(proteco_button_step(sent[0], id) == sent[id]);
+        assert(proteco_button(sent[id]) == "ABCD"[id]);
+    }
+    assert(!subghz_custom_btn_set(4)); // only 3 other buttons
+    subghz_custom_btns_reset(); // the encoder would otherwise keep applying button A
+    printf(
+        "custom buttons: A -> A, B, C, 4th = 0x%06X 0x%06X 0x%06X 0x%06X: ok\n",
+        (unsigned)sent[0],
+        (unsigned)sent[1],
+        (unsigned)sent[2],
+        (unsigned)sent[3]);
+}
+
+static int fuzz_fw_frames;
+static uint32_t fuzz_fw_key;
+
+static void fuzz_fw_callback(SubGhzProtocolDecoderBase* base, void* context) {
+    UNUSED(context);
+    fuzz_fw_frames++;
+    fuzz_fw_key = ((SubGhzProtocolDecoderCommon*)base)->generic.data;
+}
+
+/** App and firmware decoders see the same random signal and must report the same frames,
+ * sample for sample: Proteco frames at random clocks, guards and jitter, mixed with noise. */
+static void check_decoder_parity(void) {
+    ProtecoDecoder app = {0};
+    SubGhzProtocolDecoderCommon* fw = subghz_protocol_proteco.decoder->alloc(NULL);
+    fw->base.callback = fuzz_fw_callback;
+    subghz_protocol_proteco.decoder->reset(fw);
+    srand(1210);
+    int frames = 0;
+    for(int i = 0; i < 20000; i++) {
+        uint32_t samples[2 + PROTECO_BITS * 2];
+        size_t n = 0;
+        if(rand() % 4) { // a frame, possibly broken by its jitter
+            uint32_t key = ((uint32_t)rand() << 8 ^ (uint32_t)rand()) & 0xFFFFFF;
+            uint32_t te = 360 + rand() % 160, jitter = rand() % 160;
+            samples[n++] = te * (8 + rand() % 42) / 2; // guard 4..24.5 Te, across both limits
+            samples[n++] = te;
+            for(int b = PROTECO_BITS - 1; b >= 0; b--) {
+                bool one = (key >> b) & 1;
+                samples[n++] = one ? 2 * te : te;
+                samples[n++] = one ? te : 2 * te;
+            }
+            for(size_t k = 0; k < n; k++)
+                samples[k] = samples[k] + rand() % (jitter + 1) - jitter / 2;
+        } else { // noise
+            for(; n < 10; n++)
+                samples[n] = 30 + rand() % 12000;
+        }
+        for(size_t k = 0; k < n; k++) {
+            bool level = k % 2; // frames and noise both start LOW
+            uint32_t key = 0;
+            int before = fuzz_fw_frames;
+            bool found = proteco_decoder_feed(&app, level, samples[k], &key);
+            subghz_protocol_proteco.decoder->feed(fw, level, samples[k]);
+            assert(found == (fuzz_fw_frames == before + 1) && fuzz_fw_frames <= before + 1);
+            if(found) {
+                assert(key == fuzz_fw_key);
+                // same measured clock as the firmware's guard check
+                assert(app.frame_te * 37 / 2 <= app.frame_guard);
+                assert(app.frame_guard <= app.frame_te * 45 / 2);
+                frames++;
+            }
+        }
+        if(n % 2) { // keep levels alternating: pad an odd burst with a short HIGH
+            uint32_t key;
+            int before = fuzz_fw_frames;
+            assert(!proteco_decoder_feed(&app, true, 100, &key));
+            subghz_protocol_proteco.decoder->feed(fw, true, 100);
+            assert(fuzz_fw_frames == before);
+        }
+    }
+    subghz_protocol_proteco.decoder->free(fw);
+    assert(frames > 1000); // the stream really exercised both paths
+    printf("decoder parity (app == firmware), %d frames in random signal: ok\n", frames);
+}
+
+static void check_button_helpers(void) {
+    assert(proteco_button(0xDF2396) == 'A' && proteco_button(0xDF2394) == 'B');
+    assert(proteco_button(0xDF2395) == 'C' && proteco_button(0xDF2397) == 'D');
+    assert(proteco_button_step(0xDF2396, -1) == 0xDF2397); // A back to D
+    assert(proteco_button_step(0xDF2397, 1) == 0xDF2396); // D on to A
+    for(uint32_t key = 0; key < 4; key++)
+        assert(proteco_button_step(proteco_button_step(key, 1), -1) == key);
+}
+
 int main(int argc, char** argv) {
     const uint32_t keys[] = {0x000000, 0xFFFFFF, 0x5AC3E1, 0x123456, 0xA5A5A5, 0xDF2396};
     for(size_t i = 0; i < sizeof(keys) / sizeof(keys[0]); i++) {
@@ -312,12 +439,16 @@ int main(int argc, char** argv) {
     Sink bin_sink;
     sink_init(&bin_sink);
     ProtecoBinRaw bin = {.callback = sink_feed, .context = &bin_sink};
-    const uint8_t a[] = {0x00, 0x00, 0x01, 0x25, 0x92}, b[] = {0x49, 0x6C, 0xB6, 0xC9, 0x2D, 0x96, 0x4B};
+    const uint8_t a[] = {0x00, 0x00, 0x01, 0x25, 0x92},
+                  b[] = {0x49, 0x6C, 0xB6, 0xC9, 0x2D, 0x96, 0x4B};
     proteco_bin_raw_feed(&bin, a, 37, 440); // 3 pad bits, ends inside a run that b continues
     proteco_bin_raw_feed(&bin, b, 56, 440);
     proteco_bin_raw_flush(&bin);
     assert(sink_done(&bin_sink) == 1 && bin_sink.app_key == 0xDF2396);
     printf("codec round trip (app + firmware): ok\n");
+    check_button_helpers();
+    check_decoder_parity();
+    check_custom_buttons();
 
     for(int i = 1; i < argc; i++)
         decode_file(argv[i]);

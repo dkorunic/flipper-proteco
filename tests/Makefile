@@ -7,7 +7,7 @@ OUT := /tmp/proteco_test
 SUBGHZ := $(FW)/lib/subghz
 FW_SRC := types.h protocols/base.h protocols/common.h protocols/common.c protocols/proteco.h \
           protocols/proteco.c blocks/const.h blocks/decoder.h blocks/decoder.c blocks/encoder.h \
-          blocks/generic.h blocks/math.h
+          blocks/generic.h blocks/math.h blocks/custom_btn.h blocks/custom_btn_i.h blocks/custom_btn.c
 
 test:
 	rm -rf $(OUT) && mkdir -p $(OUT)/subghz/protocols $(OUT)/subghz/blocks
@@ -16,5 +16,5 @@ test:
 	$(CC) -std=gnu11 -Wall -Wextra -Werror -Ifw_stub -I$(FW) -I$(FW)/lib -I$(OUT)/subghz \
 		-o $(OUT)/test_codec test_codec.c ../proteco_codec.c \
 		$(OUT)/subghz/protocols/proteco.c $(OUT)/subghz/protocols/common.c \
-		$(OUT)/subghz/blocks/decoder.c
+		$(OUT)/subghz/blocks/decoder.c $(OUT)/subghz/blocks/custom_btn.c
 	$(OUT)/test_codec $(RAW)

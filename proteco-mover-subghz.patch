@@ -1,19 +1,41 @@
+From fa4c5bf57a84112afbaf822d7fb6c158e5e52c9f Mon Sep 17 00:00:00 2001
+From: Dinko Korunic <dinko.korunic@gmail.com>
+Date: Mon, 9 Nov 2026 18:18:26 +0000
+Subject: [PATCH 1/3] SubGHz: add Proteco MOVER protocol
+
+Proteco MOVER gate remotes (433.92 MHz AM650, 24 bit fixed code) use CAME
+line coding at Te ~440us instead of 320us, so the CAME decoder rejected them
+and they only worked as RAW. Adds decoder and encoder, unit tests and docs.
+https://github.com/flipperdevices/flipperzero-firmware/issues/2345
+---
 SubGHz: add Proteco MOVER protocol (433.92 MHz AM650, 24 bit static)
 
 Proteco MOVER gate remotes (Italy) use CAME line coding at Te ~440us
 instead of 320us, so the CAME decoder rejects every long pulse and the
-remote only worked as RAW. Adds decode, save and send, an Add Manually
-entry ("Proteco 433MHz"), and unit tests for buttons A, B and C of a
-Proteco TX3 remote.
-https://github.com/flipperdevices/flipperzero-firmware/issues/2345
+remote only worked as RAW. Adds decode, save and send, custom buttons
+(the low 2 bits of the key: A, B, C on a Proteco TX3, plus a fourth code),
+an Add Manually entry ("Proteco 433MHz"), and unit tests for buttons
+A, B and C. https://github.com/flipperdevices/flipperzero-firmware/issues/2345
 
-Apply from the root of an Unleashed firmware checkout:
-    git apply --3way proteco-mover-subghz.patch
+Merged into Unleashed dev as 57d471868 (PR #1210, 2026-11-09): trees
+from then on already have it. This file is the three commits of that PR,
+for trees that don't:
+  1/3 SubGHz: add Proteco MOVER protocol
+  2/3 SubGHz: Proteco Add Manually entry, B/C button decoder tests
+  3/3 proteco custom buttons, guard checked against frame te (by xMasterX,
+      Unleashed maintainer: custom buttons, guard checked against the
+      frame's own Te, CHANGELOG entry)
+
+Apply from the root of an Unleashed firmware checkout, either
+    git am proteco-mover-subghz.patch          (keeps the three commits)
+or  git apply --3way proteco-mover-subghz.patch   (one uncommitted change)
 or  patch -p1 < proteco-mover-subghz.patch
 
-Made against Unleashed dev (1fe237846, 2026-11). Needs a tree that has the
+Made against Unleashed dev 1fe237846 (2026-11). Needs a tree that has the
 shared helpers in lib/subghz/protocols/common.h (dev from 2026-08-31 / PR
-#1116 on). The hunks likely to drift are one-line list entries:
+#1116 on). The hunks likely to drift:
+- CHANGELOG.md (3/3): its top changes every release. If it does not
+  apply, leave it out: add --exclude=CHANGELOG.md to git am / git apply.
 - protocol_items.c/.h: if --3way leaves a conflict, keep upstream's lines
   and append `&subghz_protocol_proteco,` / `#include "proteco.h"` as the
   last entries. Keep them at the end: higher up in the list, clang-format
@@ -21,7 +43,20 @@ shared helpers in lib/subghz/protocols/common.h (dev from 2026-08-31 / PR
 - subghz_custom_event.h / subghz_scene_set_type.c (Add Manually): both
   lists are sorted by menu name; put `SetTypeProteco433` right after the
   Princeton 433MHz entry.
-The CHANGELOG entry is not included, add it by hand if wanted.
+
+ .../resources/unit_tests/subghz/proteco.sub   |   7 +
+ .../unit_tests/subghz/proteco_raw.sub         |   8 +
+ .../unit_tests/tests/subghz/subghz_test.c     |  15 ++
+ documentation/SubGHzSupportedSystems.md       |   1 +
+ lib/subghz/protocols/proteco.c                | 215 ++++++++++++++++++
+ lib/subghz/protocols/proteco.h                |  59 +++++
+ lib/subghz/protocols/protocol_items.c         |   1 +
+ lib/subghz/protocols/protocol_items.h         |   1 +
+ 8 files changed, 307 insertions(+)
+ create mode 100644 applications/debug/unit_tests/resources/unit_tests/subghz/proteco.sub
+ create mode 100644 applications/debug/unit_tests/resources/unit_tests/subghz/proteco_raw.sub
+ create mode 100644 lib/subghz/protocols/proteco.c
+ create mode 100644 lib/subghz/protocols/proteco.h
 
 diff --git a/applications/debug/unit_tests/resources/unit_tests/subghz/proteco.sub b/applications/debug/unit_tests/resources/unit_tests/subghz/proteco.sub
 new file mode 100644
@@ -36,32 +71,6 @@ index 000000000..c5beeeddd
 +Protocol: Proteco
 +Bit: 24
 +Key: 00 00 00 00 00 DF 23 96
-diff --git a/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_b_raw.sub b/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_b_raw.sub
-new file mode 100644
-index 000000000..3d21826a7
---- /dev/null
-+++ b/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_b_raw.sub
-@@ -0,0 +1,7 @@
-+Filetype: Flipper SubGhz RAW File
-+Version: 1
-+Frequency: 433920000
-+Preset: FuriHalSubGhzPresetOok650Async
-+Protocol: RAW
-+RAW_Data: -264 165 -600 197 -696 595 -100 595 -132 689 -198 163 -66 163 -66 327 -100 261 -66 427 -132 5819 -4874 65 -500 65 -4524 165 -1392 131 -560 133 -200 595 -200 297 -398 65 -66 131 -100 99 -298 499 -100 99 -200 199 -466 663 -66 303 -66 963 -66 1231 -9040 131 -3856 231 -1096 497 -132 265 -266 699 -166 297 -98 263 -132 163 -462 1325 -68 401 -68 467 -132 3309 -8792 473 -910 397 -926 413 -474 851 -910 393 -934 395 -932 413 -904 409 -912 411 -464 843 -472 843 -936 379 -506 849 -478 813 -510 813 -940 397 -928 399 -894 415 -504 841 -464 845 -902 403 -492 843 -930 379 -504 849 -478 847 -9054 421 -916 421 -912 419 -448 881 -878 421 -914 421 -912 421 -910 421 -908 421 -446 869 -456 869 -898 439 -474 849 -446 881 -446 879 -912 397 -896 451 -900 409 -482 839 -472 873 -910 399 -462 875 -910 397 -466 879 -446 875 -9034 423 -914 415 -914 417 -486 847 -912 407 -928 415 -896 419 -922 379 -946 409 -484 839 -466 845 -940 399 -462 847 -476 877 -476 847 -910 395 -932 395 -934 395 -498 851 -476 847 -908 399 -498 849 -910 397 -466 881 -444 879 -9052 419 -900 415 -910 413 -478 841 -924 407 -916 407 -918 409 -934 397 -930 395 -500 847 -480 845 -910 397 -500 849 -444 877 -478 849 -910 397 -930 397 -934 393 -502 847 -480 849 -910 395 -504 851 -910 395 -504 847 -478 849 -9054 455 -882 417 -918 417 -488 845 -916 409 -930 415 -904 407 -914 409 -934 395 -500 851 -476 849 -904 411 -474 855 -478 853 -478 849 -906 411 -940 389 -940 389 -476 855 -480 851 -912 395 -504 849 -906 411 -478 851 -480 849 -9080 421 -884 417 -916 419 -486 847 -920 411 -910 409 -928 417 -902 409 -916 409 -486 839 -472 845 -942 399 -464 879 -476 847 -478 847 -910 395 -928 411 -904 409 -480 859 -482 855 -910 395 -502 851 -910 395 -500 847 -478 849 -9048 417 -904 415 -908 415 -480 873 -894 405 -916 409 -932 411 -906 423 -908 423 -474 855 -478 849 -912 395 -500 851 -478 847 -478 847 -908 397 -932 397 -926 409 -476 851 -480 849 -908 411 -476 857 -908 411 -476 857 -482 851 -9056 417 -906 413 -910 413 -480 843 -926 417 -926 417 -886 417 -914 419 -914 419 -486 845 -486 841 -896 437 -460 845 -474 877 -478 847 -910 397 -932 397 -934 395 -500 845 -478 851 -910 399 -464 879 -912 395 -498 845 -478 849 -9036 455 -882 421 -916 421 -450 881 -912 407 -898 437 -890 451 -902 411 -914 419 -460 875 -464 843 -902 433 -462 877 -478 849 -444 881 -912 399
-+RAW_Data: -928 397 -928 397 -466 877 -478 849 -912 395 -500 849 -906 409 -476 855 -480 851 -9070 453 -896 417 -920 409 -464 845 -936 399 -930 397 -930 397 -932 395 -928 395 -500 847 -480 849 -912 393 -504 849 -480 847 -478 851 -910 395 -930 411 -942 387 -476 853 -480 855 -910 395 -502 851 -910 395 -504 849 -476 849 -9042 439 -892 409 -930 409 -476 853 -910 411 -938 409 -910 409 -910 415 -906 413 -486 869 -450 855 -908 411 -480 857 -480 855 -482 851 -908 397 -930 395 -934 413 -478 845 -470 845 -938 397 -500 845 -908 395 -500 849 -478 849 -9052 421 -914 423 -912 421 -448 877 -914 407 -898 435 -892 435 -894 453 -902 413 -484 839 -472 875 -910 399 -464 881 -446 879 -448 879 -878 453 -904 419 -888 455 -454 873 -462 839 -904 435 -462 881 -876 455 -100256 131 -166 165 -98 263 -164 97 -98 263 -624 131 -660 99 -328 129 -98 131 -196 3281 -13998 63 -852 129 -66 557 -232 295 -196 65 -196 195 -132 99
-diff --git a/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_c_raw.sub b/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_c_raw.sub
-new file mode 100644
-index 000000000..3cd3f4ded
---- /dev/null
-+++ b/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_c_raw.sub
-@@ -0,0 +1,7 @@
-+Filetype: Flipper SubGhz RAW File
-+Version: 1
-+Frequency: 433920000
-+Preset: FuriHalSubGhzPresetOok650Async
-+Protocol: RAW
-+RAW_Data: -166 165 -132 67 -166 99 -134 463 -100 331 -132 795 -234 7337 -4276 265 -98 231 -134 63 -66 133 -198 331 -134 299 -134 695 -66 131 -166 165 -432 131 -264 525 -132 457 -66 2905 -1212 259 -1066 259 -1066 259 -1034 293 -598 727 -604 757 -968 353 -536 787 -538 791 -504 817 -938 363 -962 375 -934 415 -496 811 -496 811 -964 367 -490 845 -934 397 -492 811 -936 397 -9070 455 -882 421 -914 421 -450 879 -912 405 -928 397 -926 397 -926 397 -930 395 -500 847 -480 847 -910 397 -498 851 -446 879 -446 879 -912 395 -930 395 -928 393 -500 851 -480 849 -906 395 -500 847 -908 409 -474 855 -910 409 -9072 431 -924 395 -932 395 -498 853 -910 395 -932 395 -926 411 -904 421 -908 419 -476 861 -480 851 -910 391 -502 851 -480 851 -478 849 -904 409 -902 409 -938 409 -482 829 -482 853 -908 411 -476 855 -908 409 -478 855 -908 411 -9068 419 -928 421 -884 423 -484 845 -916 409 -912 407 -912 409 -936 393 -932 423 -472 851 -480 847 -912 393 -500 855 -478 849 -474 845 -908 397 -930 393 -932 391 -500 851 -478 851 -910 397 -496 849 -908 395 -500 849 -910 395 -9064 437 -886 437 -900 409 -476 853 -910 409 -938 407 -910 409 -912 415 -912 411 -484 865 -452 855 -912 393 -502 851 -478 849 -478 847 -912 395 -930 397 -930 395 -498 849 -478 847 -912 397 -496 849 -912 397 -496 849 -908 397 -9058 419 -902 417 -902 421 -486 841 -922 409 -910 407 -928 409 -904 409 -944 385 -510 831 -480 857 -908 397 -498 849 -478 847 -478 815 -942 399 -928 393 -930 391 -500 853 -476 851 -904 409 -474 855 -904 411 -476 859 -906 411 -9074 407 -924 409 -904 421 -474 857 -908 409 -938 407 -910 409 -910 409 -910 413 -478 871 -454 861 -910 423 -472 855 -478 847 -444 881 -910 397 -926 397 -930 393 -498 853 -444 879 -910 397 -496 847 -908 397 -496 849 -910 397 -9066 423 -908 421 -912 419 -448 881 -912 387 -918 421 -914 423 -910 421 -910 421 -450 879 -450 873 -894 403 -488 843 -510 847 -476 847 -912 395 -930 397 -926 393 -502 853 -480 849 -912 393 -500 849 -910 393 -500 851 -912 395 -9070 423 -912 421 -914 421 -448 847 -946 385 -918 421 -916 419 -914 417 -902 417 -476 845 -488 843 -892 435 -458 877 -476 845 -478 849 -910 397 -928 399 -928 395 -498 851 -478 847 -908 395 -498 847 -904 409 -476 855 -906 411 -9110 395 -928 395 -930 425 -472 851 -910 421 -906 423 -906 423 -904 425 -904 425 -474 853 -480 853 -910 393 -496 851 -480 849 -478 847 -910 395
-+RAW_Data: -930 391 -934 423 -472 855 -478 849 -910 393 -498 849 -912 393 -500 851 -912 395 -9074 425 -914 423 -910 417 -472 845 -914 407 -910 419 -926 421 -914 405 -890 433 -458 877 -480 849 -910 397 -462 879 -480 849 -444 879 -906 395 -930 393 -926 409 -476 855 -480 855 -912 393 -498 851 -912 397 -464 847 -118268 99 -3578 131 -694 101 -532 163 -302 265 -330 131 -134 265 -100 99 -364 99 -132 199 -296 591 -230 131 -98 5007 -8506 297 -2160 65 -1982 263
 diff --git a/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_raw.sub b/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_raw.sub
 new file mode 100644
 index 000000000..49e8505af
@@ -77,10 +86,10 @@ index 000000000..49e8505af
 +RAW_Data: 413 -916 413 -918 413 -916 413 -918 413 -486 871 -450 857 -910 443 -482 859 -452 853 -482 853 -908 441 -910 409 -908 411 -510 839 -482 861 -912 409 -480 863 -918 415 -916 415 -484 829 -9122 423 -902 423 -906 425 -476 851 -914 421 -910 421 -910 419 -940 409 -910 409 -488 871 -452 855 -918 421 -476 853 -484 853 -482 851 -910 425 -906 425 -906 419 -476 851 -484 849 -916 423 -474 851 -914 425 -906 421 -476 853 -9090 455 -898 421 -884 455 -452 867 -896 437 -888 435 -928 399 -928 395 -934 425 -474 851 -480 851 -908 409 -478 857 -484 851 -482 849 -908 409 -940 407 -133750 65 -162 65 -666 523 -130 131 -686 461 -564 131 -202 299 -564 65 -134 97 -268 297 -66 329 -100 365 -134 265 -134 233 -168 1989 -164 4441 -8350 67 -1860 65 -332 99 -232 197 -66 295 -164 429 -100 261 -230 1521 -9592 65 -9438 63 -888 97 -294 131 -66 65 -132 329 -198 165 -132 327 -234 165 -98 99 -66 133 -1198 99 -68 497 -200 1261 -3834 67 -2510 99 -2174 67 -758 97 -496 295 -1956 163 -1394 65 -132 67 -632 165 -100 163 -66 195 -330 891 -168 231 -134 391 -66 527 -98 1209 -6432 65 -996 65 -68 129 -66 65 -132 99 -196 131 -66 65 -198 99 -394 197 -98 129 -66 2007 -98 295 -66 523 -17116 65 -1114 65 -130 131 -100 293 -198 97 -630 199 -168 329 -18062 129 -66 131 -98 63 -5068 65 -98 195 -492 261 -164 165 -1996 3219 -15014 263 -66 195 -362 165 -98 193 -292 65 -166 193 -930 65 -166 233 -532 65 -134 231 -102 795 -134 395 -264 7819 -4546 97 -264 67 -1952 65 -2320 67 -734 99 -100 165 -266 99 -266 65 -330 2053 -132 1927 -66 1095 -16582 263 -200 65 -168 133 -596 133 -594 559 -98 199 -696 231 -134 65 -68 195 -166 327 -462 165 -228 65 -196 63 -328 97 -98 331 -66 227 -98 489 -66 1723 -66 5239 -6864 133 -5580 131 -198 65 -98 165 -198 165 -98 359 -100 131 -166 99 -66 397 -100 697 -132 395 -100 1019 -66 2531 -12608 165 -136 201 -166 403 -198 67 -166 99 -100 99 -366 333 -132 233 -102 365 -102 499 -100 333 -98 827 -100 1495 -8632 131 -166 99 -1334 99 -3036 133 -132 399 -98 395 -364 427 -98 1255 -66 265 -66 1721 -100 197 -16820 65 -100 197 -630 131 -364 65 -200 99 -100 99 -166 461 -366 297 -100 195 -198 129 -132 163 -1250 133 -66 327 -66 1517 -9586 165 -6318 697 -100 65 -166 167 -17106 65 -930 67 -302 65 -100 231 -362 97 -430 493 -330 1453 -66 365 -330 4859 -13910 293 -330 163 -100 133 -198 1027 -66
 +RAW_Data: 3017 -100 3023 -9604 263 -230 197 -394 297 -230 165 -164 97 -64 163 -164 589 -19386 163 -328 163 -458 131 -558 65 -1916 163 -100 133 -100 99 -200 65 -66 2649 -64 1345 -16312 65 -398 65 -394 99 -3154 1147 -130 3689 -17044 97 -666 165 -2846 165 -526 263 -492 1191 -66 499 -68 667 -98 801 -68 2641 -11372 99 -500 165 -300 263 -858 65 -66 65 -2800 425 -294 295 -232 163 -66 97 -132 195 -330 2947 -100 265 -100 9657 -1450 65 -2354 131 -230 67 -298 67 -330 397 -300 131 -68 263 -398 99 -528 99 -1032 65 -1728 231 -732 65 -230 165 -366 65 -130 199 -430 295 -460 65 -98 297 -694 297 -134 299 -164 131 -164 8819 -7124 63 -1842 231 -2916 231 -524 163 -426 329 -262 131 -130 193 -792 363 -98 425 -100 687 -98 1217 -6400 65 -368 97 -2354 65 -266 163 -234 99 -164 431 -200 131 -232 2493 -98 1127 -18132 263 -232 231 -232 299 -198 99 -66 233 -166 133 -664 131 -464 165 -268 921 -100 759 -64 229 -132 7407 -7620 101 -200 165 -4468 65 -728 199 -166 131 -132 165 -1798 97 -100 133 -66 231 -66 1235 -66 331 -68 4937 -6568 65 -132 621 -100 195 -66 427 -66 721 -166 195 -164 261 -492 295 -198 65 -100 99 -134 133 -132 297 -200 65 -100 565 -166 463 -100 16831 -1064 65 -4692 133 -300 163 -534 65 -762 563 -200 231 -66 99 -100 133 -166 2319 -66 851 -10992 129 -3080 99 -100 197 -1164 65 -100 65 -298 131 -166 689 -430 165 -266 199 -166 291 -198 97 -66 263 -3074 99 -100 133 -66 231 -200 63 -198 267 -200 333 -164 101 -766 199 -166 433 -98 167 -68 335 -134 263 -98 7135 -7084 163 -3528 99 -802 261 -992 199 -466 65 -66 199 -1630 99 -132 667 -98 167 -98 663 -68 5985 -12178 65 -234 65 -98 99 -266 661 -66 97 -130 197 -164 263 -66 495 -66 165 -134 2989 -9026 65 -294 231 -854 229 -66 163 -230 131 -164 2315 -22842 229 -132 131 -132 229 -198 97 -100 263 -66 195 -262 97 -66 63 -66 263 -228 427 -926 63 -98 393 -132 1119 -100 6959 -6622 131 -5696 197 -164 133 -132 265 -66 233 -100 131 -396 97 -134 99 -858 331 -132 399 -102 567 -100 397 -11954 267 -366 133 -200 67 -166 295 -232 67 -100 97 -762 133 -132 99 -166 65 -166 65 -130 201 -66 729 -100 627 -98 335 -66 267 -572 67 -1252 65 -2362 197 -198 231 -434 99 -66 399 -264 99 -132 365 -296 691 -166 99 -100 831 -132 565 -98 401 -166 8137 -9200 195 -3108 65 -98 229 -66 231 -98 131 -66 229 -560 327 -132 299 -698 99 -100 199 -100 831 -100
 diff --git a/applications/debug/unit_tests/tests/subghz/subghz_test.c b/applications/debug/unit_tests/tests/subghz/subghz_test.c
-index d2427ef99..75394e5ef 100644
+index d2427ef99..f94a0774d 100644
 --- a/applications/debug/unit_tests/tests/subghz/subghz_test.c
 +++ b/applications/debug/unit_tests/tests/subghz/subghz_test.c
-@@ -440,6 +440,27 @@ MU_TEST(subghz_decoder_came_test) {
+@@ -440,6 +440,13 @@ MU_TEST(subghz_decoder_came_test) {
          "Test decoder " SUBGHZ_PROTOCOL_CAME_NAME " error\r\n");
  }
  
@@ -91,24 +100,10 @@ index d2427ef99..75394e5ef 100644
 +        "Test decoder " SUBGHZ_PROTOCOL_PROTECO_NAME " error\r\n");
 +}
 +
-+MU_TEST(subghz_decoder_proteco_b_test) {
-+    mu_assert(
-+        subghz_decoder_test(
-+            EXT_PATH("unit_tests/subghz/proteco_b_raw.sub"), SUBGHZ_PROTOCOL_PROTECO_NAME),
-+        "Test decoder " SUBGHZ_PROTOCOL_PROTECO_NAME " B error\r\n");
-+}
-+
-+MU_TEST(subghz_decoder_proteco_c_test) {
-+    mu_assert(
-+        subghz_decoder_test(
-+            EXT_PATH("unit_tests/subghz/proteco_c_raw.sub"), SUBGHZ_PROTOCOL_PROTECO_NAME),
-+        "Test decoder " SUBGHZ_PROTOCOL_PROTECO_NAME " C error\r\n");
-+}
-+
  MU_TEST(subghz_decoder_came_twee_test) {
      mu_assert(
          subghz_decoder_test(
-@@ -810,6 +831,12 @@ MU_TEST(subghz_encoder_came_test) {
+@@ -810,6 +817,12 @@ MU_TEST(subghz_encoder_came_test) {
          "Test encoder " SUBGHZ_PROTOCOL_CAME_NAME " error\r\n");
  }
  
@@ -121,17 +116,15 @@ index d2427ef99..75394e5ef 100644
  MU_TEST(subghz_encoder_came_twee_test) {
      mu_assert(
          subghz_encoder_test(EXT_PATH("unit_tests/subghz/came_twee.sub")),
-@@ -1036,6 +1063,9 @@ MU_TEST_SUITE(subghz) {
+@@ -1036,6 +1049,7 @@ MU_TEST_SUITE(subghz) {
  
      MU_RUN_TEST(subghz_decoder_came_atomo_test);
      MU_RUN_TEST(subghz_decoder_came_test);
 +    MU_RUN_TEST(subghz_decoder_proteco_test);
-+    MU_RUN_TEST(subghz_decoder_proteco_b_test);
-+    MU_RUN_TEST(subghz_decoder_proteco_c_test);
      MU_RUN_TEST(subghz_decoder_came_twee_test);
      MU_RUN_TEST(subghz_decoder_faac_slh_test);
      MU_RUN_TEST(subghz_decoder_gate_tx_test);
-@@ -1088,6 +1118,7 @@ MU_TEST_SUITE(subghz) {
+@@ -1088,6 +1102,7 @@ MU_TEST_SUITE(subghz) {
  
      MU_RUN_TEST(subghz_encoder_princeton_test);
      MU_RUN_TEST(subghz_encoder_came_test);
@@ -139,60 +132,15 @@ index d2427ef99..75394e5ef 100644
      MU_RUN_TEST(subghz_encoder_came_twee_test);
      MU_RUN_TEST(subghz_encoder_gate_tx_test);
      MU_RUN_TEST(subghz_encoder_nice_flo_test);
-diff --git a/applications/main/subghz/helpers/subghz_custom_event.h b/applications/main/subghz/helpers/subghz_custom_event.h
-index fabadc507..9bb8d56b8 100644
---- a/applications/main/subghz/helpers/subghz_custom_event.h
-+++ b/applications/main/subghz/helpers/subghz_custom_event.h
-@@ -151,6 +151,7 @@ typedef enum {
-     SetTypePrastel_433_92,
-     SetTypePricenton315,
-     SetTypePricenton433,
-+    SetTypeProteco433,
-     SetTypePujol433,
-     SetTypePujol_Vario433,
-     SetTypeReversRB2_433,
-diff --git a/applications/main/subghz/plugins/add_manually/subghz_gen_info.c b/applications/main/subghz/plugins/add_manually/subghz_gen_info.c
-index 33e6857ab..3f9cdc2d2 100644
---- a/applications/main/subghz/plugins/add_manually/subghz_gen_info.c
-+++ b/applications/main/subghz/plugins/add_manually/subghz_gen_info.c
-@@ -1095,6 +1095,16 @@ void subghz_scene_set_type_fill_generation_infos(GenInfo* infos_dest, SetType ty
-             .phoenix_v2.serial = (key & 0x0FFFFFFF) | 0xB0000000,
-             .phoenix_v2.cnt = 0x025D};
-         break;
-+    case SetTypeProteco433:
-+        gen_info = (GenInfo){
-+            .type = GenData,
-+            .mod = "AM650",
-+            .freq = 433920000,
-+            .data.name = SUBGHZ_PROTOCOL_PROTECO_NAME,
-+            // TX3: low 2 bits are the button, A (gate) = 0x2, B = 0x0, C = 0x1
-+            .data.key = (key & 0x00FFFFFC) | 0x2,
-+            .data.bits = 24};
-+        break;
-     case SetTypePrastel_433_92:
-         gen_info = (GenInfo){
-             .type = GenPrastel,
-diff --git a/applications/main/subghz/plugins/add_manually/subghz_scene_set_type.c b/applications/main/subghz/plugins/add_manually/subghz_scene_set_type.c
-index 1865bf043..d9744d23b 100644
---- a/applications/main/subghz/plugins/add_manually/subghz_scene_set_type.c
-+++ b/applications/main/subghz/plugins/add_manually/subghz_scene_set_type.c
-@@ -96,6 +96,7 @@ static const char* submenu_names[SetTypeMAX] = {
-     [SetTypePrastel_433_92] = "Prastel 433MHz",
-     [SetTypePricenton315] = "Princeton 315MHz",
-     [SetTypePricenton433] = "Princeton 433MHz",
-+    [SetTypeProteco433] = "Proteco 433MHz",
-     [SetTypePujol433] = "KL: Pujol 433MHz",
-     [SetTypePujol_Vario433] = "KL: Pujol Vario 433MHz",
-     [SetTypeReversRB2_433] = "Revers RB2 433MHz",
 diff --git a/documentation/SubGHzSupportedSystems.md b/documentation/SubGHzSupportedSystems.md
-index fd7c1d155..8c8c3e7e4 100644
+index fd7c1d155..509308199 100644
 --- a/documentation/SubGHzSupportedSystems.md
 +++ b/documentation/SubGHzSupportedSystems.md
 @@ -26,6 +26,7 @@ That list is only for default SubGHz app, apps like *Weather Station* have their
  - CAME Atomo `433.92MHz, 868MHz` `AM650` (62 bits, Dynamic) (TOPD4REN, TOP44RBN, TOP42R, TOP44R)
  - CAME TWEE `433.92MHz` `AM650` (54 bits, Pseudo-Dynamic) (+ TOP44FGN) (aka New Fixed Code)
  - CAME `433.92MHz, 868MHz` `AM650` (12, 24 bits, Static)
-+- Proteco MOVER `433.92MHz` `AM650` (24 bits, Static) - (CAME line coding at Te ~440us instead of 320us) - Add Manually: **Proteco 433MHz**
++- Proteco MOVER `433.92MHz` `AM650` (24 bits, Static) - (CAME line coding at Te ~440us instead of 320us)
  - Ditec GOL4 `433.92MHz` `AM650` (54 bits, Dynamic) (should be compatible with BIXLG4, BIXLS2, BIXLP2) - (right arrow emulates button `0` (hidden button))
  - Prastel `433.92MHz, 868MHz` `AM650` (25 bits, Static)
  - Prastel `433.92MHz, 868MHz` `AM650` (42 bits, Dynamic) - (CAME line coding; the 42 bit frame is a scrambled serial + counter, not a fixed code) (4 buttons, custom button map unverified)
@@ -503,3 +451,400 @@ index c4a02716b..6577acadc 100644
  #include "freezer.h"
  #include "faac_tm.h"
 +#include "proteco.h"
+-- 
+2.47.3
+
+
+From df1787809798ee8bd53d7c9b9d72c63530f14cdb Mon Sep 17 00:00:00 2001
+From: Dinko Korunic <dinko.korunic@gmail.com>
+Date: Mon, 9 Nov 2026 18:33:55 +0000
+Subject: [PATCH 2/3] SubGHz: Proteco Add Manually entry, B/C button decoder
+ tests
+
+Add Manually: "Proteco 433MHz", a random 24 bit key with the low 2 bits
+set to button A (gate), as on the Proteco TX3 remote (A = 0x2, B = 0x0,
+C = 0x1). Advanced mode lets the key be edited.
+
+Unit tests: one-press RAW captures of buttons B and C from a TX3 remote,
+next to the existing button A capture.
+---
+ .../unit_tests/subghz/proteco_b_raw.sub          |  7 +++++++
+ .../unit_tests/subghz/proteco_c_raw.sub          |  7 +++++++
+ .../debug/unit_tests/tests/subghz/subghz_test.c  | 16 ++++++++++++++++
+ .../main/subghz/helpers/subghz_custom_event.h    |  1 +
+ .../plugins/add_manually/subghz_gen_info.c       | 10 ++++++++++
+ .../plugins/add_manually/subghz_scene_set_type.c |  1 +
+ documentation/SubGHzSupportedSystems.md          |  2 +-
+ 7 files changed, 43 insertions(+), 1 deletion(-)
+ create mode 100644 applications/debug/unit_tests/resources/unit_tests/subghz/proteco_b_raw.sub
+ create mode 100644 applications/debug/unit_tests/resources/unit_tests/subghz/proteco_c_raw.sub
+
+diff --git a/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_b_raw.sub b/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_b_raw.sub
+new file mode 100644
+index 000000000..3d21826a7
+--- /dev/null
++++ b/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_b_raw.sub
+@@ -0,0 +1,7 @@
++Filetype: Flipper SubGhz RAW File
++Version: 1
++Frequency: 433920000
++Preset: FuriHalSubGhzPresetOok650Async
++Protocol: RAW
++RAW_Data: -264 165 -600 197 -696 595 -100 595 -132 689 -198 163 -66 163 -66 327 -100 261 -66 427 -132 5819 -4874 65 -500 65 -4524 165 -1392 131 -560 133 -200 595 -200 297 -398 65 -66 131 -100 99 -298 499 -100 99 -200 199 -466 663 -66 303 -66 963 -66 1231 -9040 131 -3856 231 -1096 497 -132 265 -266 699 -166 297 -98 263 -132 163 -462 1325 -68 401 -68 467 -132 3309 -8792 473 -910 397 -926 413 -474 851 -910 393 -934 395 -932 413 -904 409 -912 411 -464 843 -472 843 -936 379 -506 849 -478 813 -510 813 -940 397 -928 399 -894 415 -504 841 -464 845 -902 403 -492 843 -930 379 -504 849 -478 847 -9054 421 -916 421 -912 419 -448 881 -878 421 -914 421 -912 421 -910 421 -908 421 -446 869 -456 869 -898 439 -474 849 -446 881 -446 879 -912 397 -896 451 -900 409 -482 839 -472 873 -910 399 -462 875 -910 397 -466 879 -446 875 -9034 423 -914 415 -914 417 -486 847 -912 407 -928 415 -896 419 -922 379 -946 409 -484 839 -466 845 -940 399 -462 847 -476 877 -476 847 -910 395 -932 395 -934 395 -498 851 -476 847 -908 399 -498 849 -910 397 -466 881 -444 879 -9052 419 -900 415 -910 413 -478 841 -924 407 -916 407 -918 409 -934 397 -930 395 -500 847 -480 845 -910 397 -500 849 -444 877 -478 849 -910 397 -930 397 -934 393 -502 847 -480 849 -910 395 -504 851 -910 395 -504 847 -478 849 -9054 455 -882 417 -918 417 -488 845 -916 409 -930 415 -904 407 -914 409 -934 395 -500 851 -476 849 -904 411 -474 855 -478 853 -478 849 -906 411 -940 389 -940 389 -476 855 -480 851 -912 395 -504 849 -906 411 -478 851 -480 849 -9080 421 -884 417 -916 419 -486 847 -920 411 -910 409 -928 417 -902 409 -916 409 -486 839 -472 845 -942 399 -464 879 -476 847 -478 847 -910 395 -928 411 -904 409 -480 859 -482 855 -910 395 -502 851 -910 395 -500 847 -478 849 -9048 417 -904 415 -908 415 -480 873 -894 405 -916 409 -932 411 -906 423 -908 423 -474 855 -478 849 -912 395 -500 851 -478 847 -478 847 -908 397 -932 397 -926 409 -476 851 -480 849 -908 411 -476 857 -908 411 -476 857 -482 851 -9056 417 -906 413 -910 413 -480 843 -926 417 -926 417 -886 417 -914 419 -914 419 -486 845 -486 841 -896 437 -460 845 -474 877 -478 847 -910 397 -932 397 -934 395 -500 845 -478 851 -910 399 -464 879 -912 395 -498 845 -478 849 -9036 455 -882 421 -916 421 -450 881 -912 407 -898 437 -890 451 -902 411 -914 419 -460 875 -464 843 -902 433 -462 877 -478 849 -444 881 -912 399
++RAW_Data: -928 397 -928 397 -466 877 -478 849 -912 395 -500 849 -906 409 -476 855 -480 851 -9070 453 -896 417 -920 409 -464 845 -936 399 -930 397 -930 397 -932 395 -928 395 -500 847 -480 849 -912 393 -504 849 -480 847 -478 851 -910 395 -930 411 -942 387 -476 853 -480 855 -910 395 -502 851 -910 395 -504 849 -476 849 -9042 439 -892 409 -930 409 -476 853 -910 411 -938 409 -910 409 -910 415 -906 413 -486 869 -450 855 -908 411 -480 857 -480 855 -482 851 -908 397 -930 395 -934 413 -478 845 -470 845 -938 397 -500 845 -908 395 -500 849 -478 849 -9052 421 -914 423 -912 421 -448 877 -914 407 -898 435 -892 435 -894 453 -902 413 -484 839 -472 875 -910 399 -464 881 -446 879 -448 879 -878 453 -904 419 -888 455 -454 873 -462 839 -904 435 -462 881 -876 455 -100256 131 -166 165 -98 263 -164 97 -98 263 -624 131 -660 99 -328 129 -98 131 -196 3281 -13998 63 -852 129 -66 557 -232 295 -196 65 -196 195 -132 99
+diff --git a/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_c_raw.sub b/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_c_raw.sub
+new file mode 100644
+index 000000000..3cd3f4ded
+--- /dev/null
++++ b/applications/debug/unit_tests/resources/unit_tests/subghz/proteco_c_raw.sub
+@@ -0,0 +1,7 @@
++Filetype: Flipper SubGhz RAW File
++Version: 1
++Frequency: 433920000
++Preset: FuriHalSubGhzPresetOok650Async
++Protocol: RAW
++RAW_Data: -166 165 -132 67 -166 99 -134 463 -100 331 -132 795 -234 7337 -4276 265 -98 231 -134 63 -66 133 -198 331 -134 299 -134 695 -66 131 -166 165 -432 131 -264 525 -132 457 -66 2905 -1212 259 -1066 259 -1066 259 -1034 293 -598 727 -604 757 -968 353 -536 787 -538 791 -504 817 -938 363 -962 375 -934 415 -496 811 -496 811 -964 367 -490 845 -934 397 -492 811 -936 397 -9070 455 -882 421 -914 421 -450 879 -912 405 -928 397 -926 397 -926 397 -930 395 -500 847 -480 847 -910 397 -498 851 -446 879 -446 879 -912 395 -930 395 -928 393 -500 851 -480 849 -906 395 -500 847 -908 409 -474 855 -910 409 -9072 431 -924 395 -932 395 -498 853 -910 395 -932 395 -926 411 -904 421 -908 419 -476 861 -480 851 -910 391 -502 851 -480 851 -478 849 -904 409 -902 409 -938 409 -482 829 -482 853 -908 411 -476 855 -908 409 -478 855 -908 411 -9068 419 -928 421 -884 423 -484 845 -916 409 -912 407 -912 409 -936 393 -932 423 -472 851 -480 847 -912 393 -500 855 -478 849 -474 845 -908 397 -930 393 -932 391 -500 851 -478 851 -910 397 -496 849 -908 395 -500 849 -910 395 -9064 437 -886 437 -900 409 -476 853 -910 409 -938 407 -910 409 -912 415 -912 411 -484 865 -452 855 -912 393 -502 851 -478 849 -478 847 -912 395 -930 397 -930 395 -498 849 -478 847 -912 397 -496 849 -912 397 -496 849 -908 397 -9058 419 -902 417 -902 421 -486 841 -922 409 -910 407 -928 409 -904 409 -944 385 -510 831 -480 857 -908 397 -498 849 -478 847 -478 815 -942 399 -928 393 -930 391 -500 853 -476 851 -904 409 -474 855 -904 411 -476 859 -906 411 -9074 407 -924 409 -904 421 -474 857 -908 409 -938 407 -910 409 -910 409 -910 413 -478 871 -454 861 -910 423 -472 855 -478 847 -444 881 -910 397 -926 397 -930 393 -498 853 -444 879 -910 397 -496 847 -908 397 -496 849 -910 397 -9066 423 -908 421 -912 419 -448 881 -912 387 -918 421 -914 423 -910 421 -910 421 -450 879 -450 873 -894 403 -488 843 -510 847 -476 847 -912 395 -930 397 -926 393 -502 853 -480 849 -912 393 -500 849 -910 393 -500 851 -912 395 -9070 423 -912 421 -914 421 -448 847 -946 385 -918 421 -916 419 -914 417 -902 417 -476 845 -488 843 -892 435 -458 877 -476 845 -478 849 -910 397 -928 399 -928 395 -498 851 -478 847 -908 395 -498 847 -904 409 -476 855 -906 411 -9110 395 -928 395 -930 425 -472 851 -910 421 -906 423 -906 423 -904 425 -904 425 -474 853 -480 853 -910 393 -496 851 -480 849 -478 847 -910 395
++RAW_Data: -930 391 -934 423 -472 855 -478 849 -910 393 -498 849 -912 393 -500 851 -912 395 -9074 425 -914 423 -910 417 -472 845 -914 407 -910 419 -926 421 -914 405 -890 433 -458 877 -480 849 -910 397 -462 879 -480 849 -444 879 -906 395 -930 393 -926 409 -476 855 -480 855 -912 393 -498 851 -912 397 -464 847 -118268 99 -3578 131 -694 101 -532 163 -302 265 -330 131 -134 265 -100 99 -364 99 -132 199 -296 591 -230 131 -98 5007 -8506 297 -2160 65 -1982 263
+diff --git a/applications/debug/unit_tests/tests/subghz/subghz_test.c b/applications/debug/unit_tests/tests/subghz/subghz_test.c
+index f94a0774d..75394e5ef 100644
+--- a/applications/debug/unit_tests/tests/subghz/subghz_test.c
++++ b/applications/debug/unit_tests/tests/subghz/subghz_test.c
+@@ -447,6 +447,20 @@ MU_TEST(subghz_decoder_proteco_test) {
+         "Test decoder " SUBGHZ_PROTOCOL_PROTECO_NAME " error\r\n");
+ }
+ 
++MU_TEST(subghz_decoder_proteco_b_test) {
++    mu_assert(
++        subghz_decoder_test(
++            EXT_PATH("unit_tests/subghz/proteco_b_raw.sub"), SUBGHZ_PROTOCOL_PROTECO_NAME),
++        "Test decoder " SUBGHZ_PROTOCOL_PROTECO_NAME " B error\r\n");
++}
++
++MU_TEST(subghz_decoder_proteco_c_test) {
++    mu_assert(
++        subghz_decoder_test(
++            EXT_PATH("unit_tests/subghz/proteco_c_raw.sub"), SUBGHZ_PROTOCOL_PROTECO_NAME),
++        "Test decoder " SUBGHZ_PROTOCOL_PROTECO_NAME " C error\r\n");
++}
++
+ MU_TEST(subghz_decoder_came_twee_test) {
+     mu_assert(
+         subghz_decoder_test(
+@@ -1050,6 +1064,8 @@ MU_TEST_SUITE(subghz) {
+     MU_RUN_TEST(subghz_decoder_came_atomo_test);
+     MU_RUN_TEST(subghz_decoder_came_test);
+     MU_RUN_TEST(subghz_decoder_proteco_test);
++    MU_RUN_TEST(subghz_decoder_proteco_b_test);
++    MU_RUN_TEST(subghz_decoder_proteco_c_test);
+     MU_RUN_TEST(subghz_decoder_came_twee_test);
+     MU_RUN_TEST(subghz_decoder_faac_slh_test);
+     MU_RUN_TEST(subghz_decoder_gate_tx_test);
+diff --git a/applications/main/subghz/helpers/subghz_custom_event.h b/applications/main/subghz/helpers/subghz_custom_event.h
+index fabadc507..9bb8d56b8 100644
+--- a/applications/main/subghz/helpers/subghz_custom_event.h
++++ b/applications/main/subghz/helpers/subghz_custom_event.h
+@@ -151,6 +151,7 @@ typedef enum {
+     SetTypePrastel_433_92,
+     SetTypePricenton315,
+     SetTypePricenton433,
++    SetTypeProteco433,
+     SetTypePujol433,
+     SetTypePujol_Vario433,
+     SetTypeReversRB2_433,
+diff --git a/applications/main/subghz/plugins/add_manually/subghz_gen_info.c b/applications/main/subghz/plugins/add_manually/subghz_gen_info.c
+index 33e6857ab..3f9cdc2d2 100644
+--- a/applications/main/subghz/plugins/add_manually/subghz_gen_info.c
++++ b/applications/main/subghz/plugins/add_manually/subghz_gen_info.c
+@@ -1095,6 +1095,16 @@ void subghz_scene_set_type_fill_generation_infos(GenInfo* infos_dest, SetType ty
+             .phoenix_v2.serial = (key & 0x0FFFFFFF) | 0xB0000000,
+             .phoenix_v2.cnt = 0x025D};
+         break;
++    case SetTypeProteco433:
++        gen_info = (GenInfo){
++            .type = GenData,
++            .mod = "AM650",
++            .freq = 433920000,
++            .data.name = SUBGHZ_PROTOCOL_PROTECO_NAME,
++            // TX3: low 2 bits are the button, A (gate) = 0x2, B = 0x0, C = 0x1
++            .data.key = (key & 0x00FFFFFC) | 0x2,
++            .data.bits = 24};
++        break;
+     case SetTypePrastel_433_92:
+         gen_info = (GenInfo){
+             .type = GenPrastel,
+diff --git a/applications/main/subghz/plugins/add_manually/subghz_scene_set_type.c b/applications/main/subghz/plugins/add_manually/subghz_scene_set_type.c
+index 1865bf043..d9744d23b 100644
+--- a/applications/main/subghz/plugins/add_manually/subghz_scene_set_type.c
++++ b/applications/main/subghz/plugins/add_manually/subghz_scene_set_type.c
+@@ -96,6 +96,7 @@ static const char* submenu_names[SetTypeMAX] = {
+     [SetTypePrastel_433_92] = "Prastel 433MHz",
+     [SetTypePricenton315] = "Princeton 315MHz",
+     [SetTypePricenton433] = "Princeton 433MHz",
++    [SetTypeProteco433] = "Proteco 433MHz",
+     [SetTypePujol433] = "KL: Pujol 433MHz",
+     [SetTypePujol_Vario433] = "KL: Pujol Vario 433MHz",
+     [SetTypeReversRB2_433] = "Revers RB2 433MHz",
+diff --git a/documentation/SubGHzSupportedSystems.md b/documentation/SubGHzSupportedSystems.md
+index 509308199..8c8c3e7e4 100644
+--- a/documentation/SubGHzSupportedSystems.md
++++ b/documentation/SubGHzSupportedSystems.md
+@@ -26,7 +26,7 @@ That list is only for default SubGHz app, apps like *Weather Station* have their
+ - CAME Atomo `433.92MHz, 868MHz` `AM650` (62 bits, Dynamic) (TOPD4REN, TOP44RBN, TOP42R, TOP44R)
+ - CAME TWEE `433.92MHz` `AM650` (54 bits, Pseudo-Dynamic) (+ TOP44FGN) (aka New Fixed Code)
+ - CAME `433.92MHz, 868MHz` `AM650` (12, 24 bits, Static)
+-- Proteco MOVER `433.92MHz` `AM650` (24 bits, Static) - (CAME line coding at Te ~440us instead of 320us)
++- Proteco MOVER `433.92MHz` `AM650` (24 bits, Static) - (CAME line coding at Te ~440us instead of 320us) - Add Manually: **Proteco 433MHz**
+ - Ditec GOL4 `433.92MHz` `AM650` (54 bits, Dynamic) (should be compatible with BIXLG4, BIXLS2, BIXLP2) - (right arrow emulates button `0` (hidden button))
+ - Prastel `433.92MHz, 868MHz` `AM650` (25 bits, Static)
+ - Prastel `433.92MHz, 868MHz` `AM650` (42 bits, Dynamic) - (CAME line coding; the 42 bit frame is a scrambled serial + counter, not a fixed code) (4 buttons, custom button map unverified)
+-- 
+2.47.3
+
+
+From c54d07638cdf9b1d040e6640ede521588b42bd0f Mon Sep 17 00:00:00 2001
+From: MX <10697207+xMasterX@users.noreply.github.com>
+Date: Tue, 10 Nov 2026 00:28:17 +0300
+Subject: [PATCH 3/3] proteco custom buttons, guard checked against frame te
+
+---
+ CHANGELOG.md                            |   1 +
+ documentation/SubGHzSupportedSystems.md |   2 +-
+ lib/subghz/protocols/proteco.c          | 107 ++++++++++++++++++++----
+ 3 files changed, 93 insertions(+), 17 deletions(-)
+
+diff --git a/CHANGELOG.md b/CHANGELOG.md
+index d8f2bb09b..9f3d4f3db 100644
+--- a/CHANGELOG.md
++++ b/CHANGELOG.md
+@@ -22,6 +22,7 @@
+ - Apps: **`Remote Analyzer` - `Crypt` and `Crypt Lite` encrypted remotes are detected**
+ - SubGHz: **Nero Radio rolling remotes are now decoded and can be replayed as is**
+ - SubGHz: **Freezer remotes are decoded, saved and sent back**
++- SubGHz: **Proteco MOVER remotes are decoded, saved and sent back, with custom buttons** (by @dkorunic | PR #1210)
+ - SubGHz: **Frequency Analyzer - hold OK to use the frequency on screen, without waiting for it to reach the history**
+ - SubGHz: **Dooya remotes support custom buttons** (by @Lechnio | Momentum PR 597)
+ - SubGHz Remote: **The sending button is highlighted and the last pressed button's details are shown**
+diff --git a/documentation/SubGHzSupportedSystems.md b/documentation/SubGHzSupportedSystems.md
+index 8c8c3e7e4..2e1e798e2 100644
+--- a/documentation/SubGHzSupportedSystems.md
++++ b/documentation/SubGHzSupportedSystems.md
+@@ -26,7 +26,7 @@ That list is only for default SubGHz app, apps like *Weather Station* have their
+ - CAME Atomo `433.92MHz, 868MHz` `AM650` (62 bits, Dynamic) (TOPD4REN, TOP44RBN, TOP42R, TOP44R)
+ - CAME TWEE `433.92MHz` `AM650` (54 bits, Pseudo-Dynamic) (+ TOP44FGN) (aka New Fixed Code)
+ - CAME `433.92MHz, 868MHz` `AM650` (12, 24 bits, Static)
+-- Proteco MOVER `433.92MHz` `AM650` (24 bits, Static) - (CAME line coding at Te ~440us instead of 320us) - Add Manually: **Proteco 433MHz**
++- Proteco MOVER `433.92MHz` `AM650` (24 bits, Static) (TX3) - Add Manually: **Proteco 433MHz**
+ - Ditec GOL4 `433.92MHz` `AM650` (54 bits, Dynamic) (should be compatible with BIXLG4, BIXLS2, BIXLP2) - (right arrow emulates button `0` (hidden button))
+ - Prastel `433.92MHz, 868MHz` `AM650` (25 bits, Static)
+ - Prastel `433.92MHz, 868MHz` `AM650` (42 bits, Dynamic) - (CAME line coding; the 42 bit frame is a scrambled serial + counter, not a fixed code) (4 buttons, custom button map unverified)
+diff --git a/lib/subghz/protocols/proteco.c b/lib/subghz/protocols/proteco.c
+index 971129068..ab936d177 100644
+--- a/lib/subghz/protocols/proteco.c
++++ b/lib/subghz/protocols/proteco.c
+@@ -7,6 +7,8 @@
+ #include "../blocks/math.h"
+ #include "common.h"
+ 
++#include "../blocks/custom_btn_i.h"
++
+ #define TAG "SubGhzProtocolProteco"
+ 
+ /*
+@@ -15,13 +17,26 @@
+  *
+  * Same line coding as CAME, but at Te ~440us instead of 320us, so the CAME decoder
+  * accepts the guard and start bit and then rejects every long pulse:
+- *   guard  : LOW  ~21*Te (~9.1ms)
++ *   guard  : LOW  20.5*Te (~9.0ms)
+  *   start  : HIGH Te
+  *   bit 1  : LOW 2*Te, HIGH Te
+  *   bit 0  : LOW Te,   HIGH 2*Te
+- * MSB first, frame repeated while the button is held.
++ * MSB first, frame repeated while the button is held, low 2 bits are the button.
+  */
+-#define PROTECO_GUARD_TE 21u
++
++/* The guard is measured against the frame's own Te rather than a fixed us window: it is
++ * 20.4-20.6 Te on the fob and comes from the same oscillator, so this both admits a remote
++ * off clock and keeps out a foreign 24 bit frame that merely happens to sit near 9 ms.
++ * In half Te, because the fob's gap is not a whole number of them. */
++#define PROTECO_GUARD_TE_X2     41u
++#define PROTECO_GUARD_TE_X2_MIN 37u
++#define PROTECO_GUARD_TE_X2_MAX 45u
++
++/* Low 2 bits of the key, reported as buttons 1..4 so that 0 keeps its "no button seen yet"
++ * meaning in subghz_custom_btn. A, B and C are a TX3; the fourth code is unverified. */
++#define PROTECO_BTN_MASK 0x3u
++static const uint8_t subghz_protocol_proteco_btn[4] = {0x2, 0x3, 0x1, 0x4};
++static const uint8_t subghz_protocol_proteco_btn_raw[5] = {0x0, 0x2, 0x0, 0x1, 0x3};
+ 
+ static const SubGhzBlockConst subghz_protocol_proteco_const = {
+     .te_short = 440,
+@@ -35,8 +50,11 @@ struct SubGhzProtocolDecoderProteco {
+ 
+     SubGhzBlockDecoder decoder;
+     SubGhzBlockGeneric generic;
++
++    uint32_t te; // sum of the frame's pulses, then the mean Te
++    uint32_t guard; // the LOW that opened the frame
+ };
+-SUBGHZ_ASSERT_DECODER_COMMON_LAYOUT(SubGhzProtocolDecoderProteco);
++SUBGHZ_ASSERT_DECODER_TE_LAYOUT(SubGhzProtocolDecoderProteco);
+ 
+ struct SubGhzProtocolEncoderProteco {
+     SubGhzProtocolEncoderBase base;
+@@ -92,6 +110,21 @@ void* subghz_protocol_encoder_proteco_alloc(SubGhzEnvironment* environment) {
+         sizeof(SubGhzProtocolEncoderProteco), &subghz_protocol_proteco, 10, 50);
+ }
+ 
++/**
++ * Defines the button value for the current btn_id.
++ * @return Button code 1..4, or 0 while no original button is known
++ */
++static uint8_t subghz_protocol_proteco_get_btn_code(void) {
++    uint8_t original_btn_code = subghz_custom_btn_get_original();
++    uint8_t custom_btn_id = subghz_custom_btn_get();
++
++    if((original_btn_code == 0) || (custom_btn_id == SUBGHZ_CUSTOM_BTN_OK)) {
++        return original_btn_code;
++    }
++    // one of the three other fob buttons per arrow key
++    return (uint8_t)(((original_btn_code - 1u + custom_btn_id) & PROTECO_BTN_MASK) + 1u);
++}
++
+ /**
+  * Generating an upload from data.
+  * @param context Pointer to a SubGhzProtocolEncoderProteco instance
+@@ -102,7 +135,19 @@ static bool subghz_protocol_encoder_proteco_get_upload(void* context) {
+     const SubGhzBlockConst* c = &subghz_protocol_proteco_const;
+     size_t index = 0;
+ 
+-    instance->encoder.upload[index++] = level_duration_make(false, c->te_short * PROTECO_GUARD_TE);
++    uint8_t btn = subghz_protocol_proteco_get_btn_code();
++
++    // override button if we change it with signal settings button editor
++    if(subghz_block_generic_global_button_override_get(&btn)) {
++        FURI_LOG_D(TAG, "Button sucessfully changed to 0x%X", btn);
++    }
++    if((btn >= 1) && (btn <= 4)) {
++        instance->generic.data = (instance->generic.data & ~(uint64_t)PROTECO_BTN_MASK) |
++                                 subghz_protocol_proteco_btn_raw[btn];
++    }
++
++    instance->encoder.upload[index++] =
++        level_duration_make(false, c->te_short * PROTECO_GUARD_TE_X2 / 2);
+     instance->encoder.upload[index++] = level_duration_make(true, c->te_short);
+     for(uint8_t i = instance->generic.data_count_bit; i > 0; i--) {
+         if(bit_read(instance->generic.data, i - 1)) {
+@@ -132,6 +177,17 @@ void* subghz_protocol_decoder_proteco_alloc(SubGhzEnvironment* environment) {
+         sizeof(SubGhzProtocolDecoderProteco), &subghz_protocol_proteco);
+ }
+ 
++/** Is the LOW that opened this frame 20.5 Te of the frame's own clock?
++ * @param instance Pointer to a SubGhzProtocolDecoderProteco instance
++ * @return true if the gap belongs to this frame's oscillator
++ */
++static bool subghz_protocol_proteco_guard_ok(SubGhzProtocolDecoderProteco* instance) {
++    // start bit plus 3 Te per bit
++    uint32_t te = instance->te / (instance->decoder.decode_count_bit * 3 + 1);
++    return (instance->guard >= te * PROTECO_GUARD_TE_X2_MIN / 2) &&
++           (instance->guard <= te * PROTECO_GUARD_TE_X2_MAX / 2);
++}
++
+ void subghz_protocol_decoder_proteco_feed(void* context, bool level, uint32_t duration) {
+     furi_assert(context);
+     SubGhzProtocolDecoderProteco* instance = context;
+@@ -139,8 +195,8 @@ void subghz_protocol_decoder_proteco_feed(void* context, bool level, uint32_t du
+ 
+     switch(instance->decoder.parser_step) {
+     case ProtecoDecoderStepReset:
+-        if((!level) && (DURATION_DIFF(duration, c->te_short * PROTECO_GUARD_TE) <
+-                        c->te_delta * PROTECO_GUARD_TE / 2)) {
++        if((!level) && (duration >= c->te_short * 4)) {
++            instance->guard = duration;
+             instance->decoder.parser_step = ProtecoDecoderStepFoundStartBit;
+         }
+         break;
+@@ -148,6 +204,7 @@ void subghz_protocol_decoder_proteco_feed(void* context, bool level, uint32_t du
+         if(level && (DURATION_DIFF(duration, c->te_short) < c->te_delta)) {
+             instance->decoder.decode_data = 0;
+             instance->decoder.decode_count_bit = 0;
++            instance->te = duration;
+             instance->decoder.parser_step = ProtecoDecoderStepSaveDuration;
+         } else {
+             instance->decoder.parser_step = ProtecoDecoderStepReset;
+@@ -159,32 +216,33 @@ void subghz_protocol_decoder_proteco_feed(void* context, bool level, uint32_t du
+             break;
+         }
+         if(duration >= c->te_short * 4) {
+-            // guard reached, the frame ends here and the next one may follow
+-            if(instance->decoder.decode_count_bit == c->min_count_bit_for_found) {
++            // this gap ends the frame and is the next frame's guard
++            if((instance->decoder.decode_count_bit == c->min_count_bit_for_found) &&
++               subghz_protocol_proteco_guard_ok(instance)) {
+                 instance->generic.data = instance->decoder.decode_data;
+                 instance->generic.data_count_bit = instance->decoder.decode_count_bit;
+                 if(instance->base.callback)
+                     instance->base.callback(&instance->base, instance->base.context);
+             }
+-            instance->decoder.parser_step =
+-                (DURATION_DIFF(duration, c->te_short * PROTECO_GUARD_TE) <
+-                 c->te_delta * PROTECO_GUARD_TE / 2) ?
+-                    ProtecoDecoderStepFoundStartBit :
+-                    ProtecoDecoderStepReset;
++            instance->guard = duration;
++            instance->decoder.parser_step = ProtecoDecoderStepFoundStartBit;
+             break;
+         }
+         instance->decoder.te_last = duration;
++        instance->te += duration;
+         instance->decoder.parser_step = ProtecoDecoderStepCheckDuration;
+         break;
+     case ProtecoDecoderStepCheckDuration:
+         if(level && (DURATION_DIFF(instance->decoder.te_last, c->te_short) < c->te_delta) &&
+            (DURATION_DIFF(duration, c->te_long) < c->te_delta)) {
+             subghz_protocol_blocks_add_bit(&instance->decoder, 0);
++            instance->te += duration;
+             instance->decoder.parser_step = ProtecoDecoderStepSaveDuration;
+         } else if(
+             level && (DURATION_DIFF(instance->decoder.te_last, c->te_long) < c->te_delta) &&
+             (DURATION_DIFF(duration, c->te_short) < c->te_delta)) {
+             subghz_protocol_blocks_add_bit(&instance->decoder, 1);
++            instance->te += duration;
+             instance->decoder.parser_step = ProtecoDecoderStepSaveDuration;
+         } else {
+             instance->decoder.parser_step = ProtecoDecoderStepReset;
+@@ -205,11 +263,28 @@ void subghz_protocol_decoder_proteco_get_string(void* context, FuriString* outpu
+     furi_assert(context);
+     SubGhzProtocolDecoderProteco* instance = context;
+ 
++    instance->generic.serial = (uint32_t)(instance->generic.data >> 2) & 0x3FFFFF;
++    instance->generic.btn = subghz_protocol_proteco_btn[instance->generic.data & PROTECO_BTN_MASK];
++
++    // Save original button for later use
++    if(subghz_custom_btn_get_original() == 0) {
++        subghz_custom_btn_set_original(instance->generic.btn);
++    }
++    subghz_custom_btn_set_max(3);
++
++    // push protocol data to global variable
++    subghz_block_generic_global.btn_is_available = true;
++    subghz_block_generic_global.current_btn = instance->generic.btn;
++    subghz_block_generic_global.btn_length_bit = 3;
++
+     furi_string_cat_printf(
+         output,
+         "%s %dbit\r\n"
+-        "Key:0x%06lX\r\n",
++        "Key:0x%06lX\r\n"
++        "Sn:0x%06lX  Btn:%X\r\n",
+         instance->generic.protocol_name,
+         instance->generic.data_count_bit,
+-        (uint32_t)(instance->generic.data & 0xFFFFFF));
++        (uint32_t)(instance->generic.data & 0xFFFFFF),
++        instance->generic.serial,
++        instance->generic.btn);
+ }
+-- 
+2.47.3
+
